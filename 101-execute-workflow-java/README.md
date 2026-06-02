@@ -3,7 +3,7 @@
 This guide shows how to connect to a running Vextura cluster, list registered workflows,
 execute one, and poll until it completes — using the official `uwf-engine-sdk-java` SDK.
 
-**SDK version used:** `1.2.1` (latest on Maven Central)
+**SDK version used:** `1.2.2` (latest on Maven Central)
 
 ---
 
@@ -26,14 +26,14 @@ execute one, and poll until it completes — using the official `uwf-engine-sdk-
 <dependency>
     <groupId>ai.vextura</groupId>
     <artifactId>uwf-engine-sdk-java</artifactId>
-    <version>1.2.1</version>
+    <version>1.2.2</version>
 </dependency>
 ```
 
 **Gradle (`build.gradle`)**
 
 ```groovy
-implementation 'ai.vextura:uwf-engine-sdk-java:1.2.1'
+implementation 'ai.vextura:uwf-engine-sdk-java:1.2.2'
 ```
 
 ---
