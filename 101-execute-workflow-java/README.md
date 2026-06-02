@@ -147,17 +147,13 @@ Expected output:
 Engine status : healthy
 NATS          : true
 Redis         : true
-Workflows     : 3 registered
+Workflows     : 1 registered
   • kaspi-payment-v1 — Kaspi Payment Fraud Detection
-  • kaspi-payment-flow — Kaspi Payment Approval Flow
-  • truckpay-settlement — TruckPay Settlement Processing
 
 Executing workflow : kaspi-payment-v1
-Run ID             : run-1780371635657067673
+Run ID             : run-1780414376887205751
 Initial status     : pending
-  [ 1s] status=running      step=fraud-check
-  [ 2s] status=running      step=score-eval
-  [ 3s] status=completed    step=null
+  [ 1s] status=completed    step=null
 
 Final status       : completed
 ```
