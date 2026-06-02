@@ -1,6 +1,6 @@
 # 101 — Execute a Workflow with the Java SDK
 
-**SDK:** `ai.vextura:uwf-engine-sdk-java:1.2.2`
+**SDK:** `ai.vextura:uwf-engine-sdk-java:1.2.4`
 
 ---
 
@@ -17,14 +17,13 @@ No `vexctl` required for application code — auth is handled by the SDK automat
 
 ## What your Vextura admin gives you
 
-Before running anything your admin provides four values:
+Before running anything your admin provides three values:
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `VEX_AUTH_URL` | vex-auth service URL | `http://vex-auth.your-cluster.internal:8095` |
+| `VEX_GATE_URL` | vex-gate URL (single entry point for auth + workflows) | `http://vex-gate.your-cluster.internal:8080` |
 | `VEX_CLIENT_ID` | Your M2M client ID | `my-app` |
 | `VEX_CLIENT_SECRET` | Your M2M client secret | `abc123...` |
-| `UWF_ENDPOINT` | Workflow engine URL | `http://uwf-engine.your-cluster.internal:8080` |
 
 ---
 
@@ -33,16 +32,17 @@ Before running anything your admin provides four values:
 The SDK uses the **OAuth2 `client_credentials` grant**. You never manage tokens manually:
 
 ```
-Your app           vex-auth                vex-engine
-    │                  │                        │
-    │── POST /auth/token ──────────────────────>│
-    │   grant_type=client_credentials           │
-    │   client_id + client_secret               │
-    │<── { access_token, expires_in: 3600 } ────│
-    │                                           │
-    │── GET /api/v1/workflows ── Bearer <token>──>│
-    │                                           │
-    │  (token auto-refreshes 60s before expiry) │
+Your app           vex-gate             workflow-api
+    │                  │                     │
+    │── POST /auth/token ──────────────────>│
+    │   grant_type=client_credentials       │
+    │   client_id + client_secret           │
+    │<── { access_token, expires_in: 3600 }─│
+    │                                       │
+    │── GET /workflow/definitions ─ Bearer──>│─→ workflow-api
+    │── POST /workflow/executions/{id} ─────>│─→ workflow-api
+    │                                       │
+    │  (token auto-refreshes 60s before expiry)
 ```
 
 `M2MAuth` caches the token and refreshes it automatically — no manual refresh needed.
@@ -56,13 +56,13 @@ Your app           vex-auth                vex-engine
 <dependency>
     <groupId>ai.vextura</groupId>
     <artifactId>uwf-engine-sdk-java</artifactId>
-    <version>1.2.2</version>
+    <version>1.2.4</version>
 </dependency>
 ```
 
 **Gradle:**
 ```groovy
-implementation 'ai.vextura:uwf-engine-sdk-java:1.2.2'
+implementation 'ai.vextura:uwf-engine-sdk-java:1.2.4'
 ```
 
 ---
@@ -73,18 +73,17 @@ implementation 'ai.vextura:uwf-engine-sdk-java:1.2.2'
 import ai.vextura.uwf_engine.UwfEngineClient;
 import ai.vextura.uwf_engine.runtime.M2MAuth;
 
-// M2MAuth fetches the JWT on first use and refreshes automatically before expiry.
-// All four values come from your Vextura admin — never hardcode them.
+// All three values come from your Vextura admin — never hardcode them.
+// M2MAuth calls <gateUrl>/auth/token to get a JWT, then caches and auto-refreshes it.
+String gateUrl = System.getenv("VEX_GATE_URL");
+
 M2MAuth auth = new M2MAuth(
-    System.getenv("VEX_AUTH_URL"),
+    gateUrl,
     System.getenv("VEX_CLIENT_ID"),
     System.getenv("VEX_CLIENT_SECRET")
 );
 
-UwfEngineClient client = UwfEngineClient.withEndpoint(
-    System.getenv("UWF_ENDPOINT"),
-    auth
-);
+UwfEngineClient client = UwfEngineClient.withEndpoint(gateUrl, auth);
 ```
 
 ---
@@ -133,11 +132,10 @@ for (int i = 0; i < 30; i++) {
 git clone https://github.com/vextura/vex-user-guide.git
 cd vex-user-guide/101-execute-workflow-java
 
-# Set the four values your admin gave you
-export VEX_AUTH_URL=http://vex-auth.your-cluster.internal:8095
+# Set the three values your admin gave you
+export VEX_GATE_URL=http://vex-gate.your-cluster.internal:8080
 export VEX_CLIENT_ID=my-app
 export VEX_CLIENT_SECRET=your-secret
-export UWF_ENDPOINT=http://uwf-engine.your-cluster.internal:8080
 export WORKFLOW_ID=kaspi-payment-v1
 
 # Build and run
@@ -185,10 +183,10 @@ Final status       : completed
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `VEX_AUTH_URL is required` | Env var not set | Set all four env vars from your admin |
+| `VEX_GATE_URL is required` | Env var not set | Set all three env vars from your admin |
 | `M2MAuth: token request failed (400)` | Wrong grant or bad credentials | Verify `VEX_CLIENT_ID` / `VEX_CLIENT_SECRET` with your admin |
 | `M2MAuth: token request failed (401)` | Invalid credentials | Re-confirm credentials with your admin |
-| `Connection refused on UWF_ENDPOINT` | Wrong URL or no network access | Confirm you're on the cluster network and `UWF_ENDPOINT` is correct |
+| `Connection refused on VEX_GATE_URL` | Wrong URL or no network access | Confirm you're on the cluster network and `VEX_GATE_URL` is correct |
 | `404 workflow not found` | Wrong workflow ID | Call `client.listWorkflows()` to see registered IDs |
 
 ---

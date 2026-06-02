@@ -12,27 +12,27 @@ import java.util.Map;
  * execute a workflow, and poll until completion.
  *
  * Required environment variables — provided by your Vextura admin:
- *   VEX_AUTH_URL      vex-auth base URL,   e.g. http://vex-auth.your-cluster.internal:8095
+ *   VEX_GATE_URL      vex-gate base URL,  e.g. http://vex-gate.your-cluster.internal:8080
  *   VEX_CLIENT_ID     your client ID
  *   VEX_CLIENT_SECRET your client secret
- *   UWF_ENDPOINT      workflow engine URL, e.g. http://uwf-engine.your-cluster.internal:8080
- *   WORKFLOW_ID       workflow to run,     e.g. kaspi-payment-v1
+ *   WORKFLOW_ID       workflow to run,    e.g. kaspi-payment-v1
  */
 public class ExecuteWorkflow {
 
     public static void main(String[] args) throws InterruptedException {
+        String gateUrl = require("VEX_GATE_URL", "vex-gate base URL — provided by your Vextura admin");
+
         // ── 1. Auth — M2MAuth fetches a JWT automatically and refreshes before expiry ──
         M2MAuth auth = new M2MAuth(
-            require("VEX_AUTH_URL",      "vex-auth base URL — provided by your Vextura admin"),
+            gateUrl,
             require("VEX_CLIENT_ID",     "your M2M client ID — provided by your Vextura admin"),
             require("VEX_CLIENT_SECRET", "your M2M client secret — provided by your Vextura admin")
         );
 
         // ── 2. Client ─────────────────────────────────────────────────────────────────
-        String endpoint  = require("UWF_ENDPOINT", "workflow engine URL — provided by your Vextura admin");
         String workflowId = System.getenv().getOrDefault("WORKFLOW_ID", "kaspi-payment-v1");
 
-        UwfEngineClient client = UwfEngineClient.withEndpoint(endpoint, auth);
+        UwfEngineClient client = UwfEngineClient.withEndpoint(gateUrl, auth);
 
         // ── 3. Health check ───────────────────────────────────────────────────────────
         HealthResponse health = client.healthCheck();
