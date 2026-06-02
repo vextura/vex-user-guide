@@ -1,27 +1,57 @@
 # 101 — Execute a Workflow with the Java SDK
 
-This guide shows how to connect to a running Vextura cluster, list registered workflows,
-execute one, and poll until it completes — using the official `uwf-engine-sdk-java` SDK.
-
-**SDK version used:** `1.2.2` (latest on Maven Central)
+**SDK:** `ai.vextura:uwf-engine-sdk-java:1.2.2`
 
 ---
 
 ## Prerequisites
 
-| Tool | Version | Notes |
-|------|---------|-------|
-| Java | 21+ | `java -version` |
-| Maven | 3.9+ | `mvn -version` |
-| vexctl | any | [Install guide](https://github.com/vextura/vexctl) |
-| Vextura cluster access | — | Dev, staging, or production |
+| Tool | Version |
+|------|---------|
+| Java | 21+ |
+| Maven | 3.9+ |
+
+No `vexctl` required for application code — auth is handled by the SDK automatically.
+
+---
+
+## What your Vextura admin gives you
+
+Before running anything your admin provides four values:
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `VEX_AUTH_URL` | vex-auth service URL | `http://vex-auth.your-cluster.internal:8095` |
+| `VEX_CLIENT_ID` | Your M2M client ID | `my-app` |
+| `VEX_CLIENT_SECRET` | Your M2M client secret | `abc123...` |
+| `UWF_ENDPOINT` | Workflow engine URL | `http://uwf-engine.your-cluster.internal:8080` |
+
+---
+
+## How authentication works
+
+The SDK uses the **OAuth2 `client_credentials` grant**. You never manage tokens manually:
+
+```
+Your app           vex-auth                vex-engine
+    │                  │                        │
+    │── POST /auth/token ──────────────────────>│
+    │   grant_type=client_credentials           │
+    │   client_id + client_secret               │
+    │<── { access_token, expires_in: 3600 } ────│
+    │                                           │
+    │── GET /api/v1/workflows ── Bearer <token>──>│
+    │                                           │
+    │  (token auto-refreshes 60s before expiry) │
+```
+
+`M2MAuth` caches the token and refreshes it automatically — no manual refresh needed.
 
 ---
 
 ## Step 1 — Add the dependency
 
-**Maven (`pom.xml`)**
-
+**Maven:**
 ```xml
 <dependency>
     <groupId>ai.vextura</groupId>
@@ -30,57 +60,41 @@ execute one, and poll until it completes — using the official `uwf-engine-sdk-
 </dependency>
 ```
 
-**Gradle (`build.gradle`)**
-
+**Gradle:**
 ```groovy
 implementation 'ai.vextura:uwf-engine-sdk-java:1.2.2'
 ```
 
 ---
 
-## Step 2 — Resolve your endpoint
-
-The SDK connects to the workflow engine via RIP — no hardcoded URLs.
-
-```bash
-# Resolve the workflow engine endpoint for your region
-export UWF_ENDPOINT=$(vexctl rip resolve uwf-engine <your-region>)
-
-# Verify
-echo $UWF_ENDPOINT
-# → http://10.x.x.x:8080  (or a DNS name inside the cluster)
-```
-
-> **Regions:** `kz-north-1`, `local-dev`, or whatever your cluster is configured with.
-> Run `vexctl rip list` to see all registered services and regions.
-
----
-
-## Step 3 — Get an auth token
-
-```bash
-export VEX_TOKEN=$(vexctl auth token)
-```
-
-Tokens expire — re-run this if you get `401` responses.
-
----
-
-## Step 4 — Create a client and execute a workflow
+## Step 2 — Create the client
 
 ```java
 import ai.vextura.uwf_engine.UwfEngineClient;
-import ai.vextura.uwf_engine.models.*;
-import ai.vextura.uwf_engine.runtime.BearerAuth;
-import java.util.Map;
+import ai.vextura.uwf_engine.runtime.M2MAuth;
 
-// 1. Create client — endpoint resolved via RIP, never hardcoded
-UwfEngineClient client = UwfEngineClient.withEndpoint(
-    System.getenv("UWF_ENDPOINT"),
-    new BearerAuth(System.getenv("VEX_TOKEN"))
+// M2MAuth fetches the JWT on first use and refreshes automatically before expiry.
+// All four values come from your Vextura admin — never hardcode them.
+M2MAuth auth = new M2MAuth(
+    System.getenv("VEX_AUTH_URL"),
+    System.getenv("VEX_CLIENT_ID"),
+    System.getenv("VEX_CLIENT_SECRET")
 );
 
-// 2. Execute a workflow
+UwfEngineClient client = UwfEngineClient.withEndpoint(
+    System.getenv("UWF_ENDPOINT"),
+    auth
+);
+```
+
+---
+
+## Step 3 — Execute a workflow
+
+```java
+import ai.vextura.uwf_engine.models.*;
+import java.util.Map;
+
 ExecuteWorkflowInput req = new ExecuteWorkflowInput();
 req.workflowId = "kaspi-payment-v1";
 req.inputData  = Map.of(
@@ -91,52 +105,63 @@ req.inputData  = Map.of(
 
 ExecutionResult result = client.executeWorkflow(req);
 System.out.println("Run ID: " + result.runId);
-
-// 3. Poll for status
-RunIdInput statusReq = new RunIdInput();
-statusReq.runId = result.runId;
-
-ExecutionStatus status = client.getExecutionStatus(statusReq);
-System.out.println("Status: " + status.status);
+System.out.println("Status: " + result.status);   // "pending" or "completed"
 ```
 
 ---
 
-## Step 5 — Run the example
+## Step 4 — Poll for completion
 
-This repo contains a complete runnable example with polling.
+```java
+RunIdInput statusReq = new RunIdInput();
+statusReq.runId = result.runId;
+
+for (int i = 0; i < 30; i++) {
+    ExecutionStatus s = client.getExecutionStatus(statusReq);
+    System.out.println(s.status);  // pending → running → completed/failed
+    if ("completed".equals(s.status) || "failed".equals(s.status)) break;
+    Thread.sleep(1_000);
+}
+```
+
+---
+
+## Step 5 — Run the full example
 
 ```bash
 # Clone this repo
 git clone https://github.com/vextura/vex-user-guide.git
 cd vex-user-guide/101-execute-workflow-java
 
-# Set environment variables
-export UWF_ENDPOINT=$(vexctl rip resolve uwf-engine <your-region>)
-export VEX_TOKEN=$(vexctl auth token)
-export WORKFLOW_ID=kaspi-payment-v1   # or any workflow registered in your cluster
+# Set the four values your admin gave you
+export VEX_AUTH_URL=http://vex-auth.your-cluster.internal:8095
+export VEX_CLIENT_ID=my-app
+export VEX_CLIENT_SECRET=your-secret
+export UWF_ENDPOINT=http://uwf-engine.your-cluster.internal:8080
+export WORKFLOW_ID=kaspi-payment-v1
 
 # Build and run
 mvn compile exec:java
 ```
 
 Expected output:
-
 ```
 Engine status : healthy
+NATS          : true
+Redis         : true
 Workflows     : 3 registered
   • kaspi-payment-v1 — Kaspi Payment Fraud Detection
   • kaspi-payment-flow — Kaspi Payment Approval Flow
   • truckpay-settlement — TruckPay Settlement Processing
 
-Executing workflow: kaspi-payment-v1
-Run ID        : run-1780371635657067673
-Initial status: pending
-  [ 1s] status=running step=fraud-check
-  [ 2s] status=running step=score-eval
-  [ 3s] status=completed step=null
+Executing workflow : kaspi-payment-v1
+Run ID             : run-1780371635657067673
+Initial status     : pending
+  [ 1s] status=running      step=fraud-check
+  [ 2s] status=running      step=score-eval
+  [ 3s] status=completed    step=null
 
-Final status  : completed
+Final status       : completed
 ```
 
 ---
@@ -145,33 +170,14 @@ Final status  : completed
 
 | Method | Description |
 |--------|-------------|
-| `client.healthCheck()` | Check engine status (nats + redis connectivity) |
+| `client.healthCheck()` | Check engine + NATS + Redis status |
 | `client.listWorkflows()` | List all registered workflow definitions |
 | `client.getWorkflow(req)` | Get a single workflow definition by ID |
-| `client.executeWorkflow(req)` | Execute a workflow synchronously, returns runId |
-| `client.asyncExecuteWorkflow(req)` | Execute without waiting for completion |
+| `client.executeWorkflow(req)` | Execute synchronously, returns runId |
+| `client.asyncExecuteWorkflow(req)` | Execute without waiting |
 | `client.getExecutionStatus(req)` | Poll execution status by runId |
-| `client.listExecutions(req)` | List past executions (supports pagination) |
+| `client.listExecutions(req)` | List past executions (paginated) |
 | `client.cancelExecution(req)` | Cancel a running execution |
-
----
-
-## Using RIP-based endpoint resolution (production pattern)
-
-For production code, pass the vex-config URL to let the SDK resolve the endpoint
-automatically via RIP — no need to pass a fixed endpoint:
-
-```java
-// Resolves uwf-engine endpoint automatically at request time
-// ripUrl comes from: vexctl rip resolve vex-config <region>
-UwfEngineClient client = new UwfEngineClient(
-    System.getenv("VEX_CONFIG_URL"),
-    new BearerAuth(System.getenv("VEX_TOKEN"))
-);
-```
-
-This way if the engine moves to a different node, the client picks it up without
-a redeploy.
 
 ---
 
@@ -179,10 +185,11 @@ a redeploy.
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `UWF_ENDPOINT is required` | Env var not set | Run `export UWF_ENDPOINT=$(vexctl rip resolve uwf-engine <region>)` |
-| `401 Unauthorized` | Token expired | Run `export VEX_TOKEN=$(vexctl auth token)` |
-| `404 workflow not found` | Wrong workflow ID | Run `client.listWorkflows()` to see registered IDs |
-| `Connection refused` | Engine not reachable | Check `vexctl rip list` — verify uwf-engine is registered |
+| `VEX_AUTH_URL is required` | Env var not set | Set all four env vars from your admin |
+| `M2MAuth: token request failed (400)` | Wrong grant or bad credentials | Verify `VEX_CLIENT_ID` / `VEX_CLIENT_SECRET` with your admin |
+| `M2MAuth: token request failed (401)` | Invalid credentials | Re-confirm credentials with your admin |
+| `Connection refused on UWF_ENDPOINT` | Wrong URL or no network access | Confirm you're on the cluster network and `UWF_ENDPOINT` is correct |
+| `404 workflow not found` | Wrong workflow ID | Call `client.listWorkflows()` to see registered IDs |
 
 ---
 
