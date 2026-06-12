@@ -7,6 +7,7 @@ Practical guides for building on the Vextura Platform. Each guide is self-contai
 | # | Title | What you'll learn |
 |---|-------|-------------------|
 | [101](./101-execute-workflow-java/) | Execute a Workflow — Java SDK | Install the SDK, resolve endpoints via RIP, execute a workflow, poll for result |
+| [102](./102-taf-payment-workflow-java/) | TAF Payment Anti-Fraud Workflow — Java SDK | Submit a payment transaction to the TAF anti-fraud service, get a verdict synchronously or asynchronously |
 
 > More guides coming: Python SDK, Go SDK, deploying a service, setting up a pipeline.
 
