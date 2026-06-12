@@ -4,6 +4,7 @@ import ai.vextura.uwf_engine.UwfEngineClient;
 import ai.vextura.uwf_engine.models.*;
 import ai.vextura.uwf_engine.runtime.BearerAuth;
 import ai.vextura.uwf_engine.runtime.M2MAuth;
+import ai.vextura.uwf_engine.runtime.NoAuth;
 import ai.vextura.uwf_engine.runtime.AuthProvider;
 
 import java.time.Instant;
@@ -12,16 +13,18 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Guide 102: TAF Payment Workflow — Java SDK
+ * Demonstrates submitting a payment transaction to the TAF anti-fraud workflow
+ * using the Vextura UWF Engine SDK.
  *
- * Demonstrates synchronous and asynchronous execution of the taf-payment-v1
- * anti-fraud workflow using the Vextura UWF Engine SDK.
+ * Environment variables:
+ *   VEX_GATE_URL      — base URL of the workflow engine (required)
+ *   VEX_AUTH_URL      — base URL of the auth service for M2M (optional; defaults to VEX_GATE_URL)
+ *   VEX_CLIENT_ID     — M2M client ID (optional)
+ *   VEX_CLIENT_SECRET — M2M client secret (optional, paired with VEX_CLIENT_ID)
+ *   VEX_TOKEN         — static Bearer token (optional fallback)
  *
- * Required environment variables:
- *   VEX_GATE_URL      — Vextura API gateway URL (from your admin)
- *   VEX_CLIENT_ID     — M2M client ID (recommended)
- *   VEX_CLIENT_SECRET — M2M client secret (recommended)
- *   VEX_TOKEN         — static Bearer token (alternative for local dev)
+ * If none of the auth variables are set the client sends requests with no
+ * Authorization header — suitable for engine endpoints that require no auth.
  *
  * Run:
  *   mvn compile exec:java
@@ -36,11 +39,9 @@ public class TafPaymentExample {
 
         UwfEngineClient client = UwfEngineClient.withEndpoint(gateUrl, auth);
 
-        // Verify connectivity before sending transactions
-        HealthResponse health = client.healthCheck();
-        System.out.println("Engine status : " + health.status);
-        System.out.println("NATS          : " + (health.nats != null ? health.nats.ok : "n/a"));
-        System.out.println("Redis         : " + (health.redis != null ? health.redis.ok : "n/a"));
+        System.out.println("=== TAF Payment Workflow Example ===");
+        System.out.println("Gate  : " + gateUrl);
+        System.out.println("Workflow: " + WORKFLOW_ID);
         System.out.println();
 
         runSyncExample(client);
@@ -48,78 +49,92 @@ public class TafPaymentExample {
         runAsyncExample(client);
     }
 
-    // -----------------------------------------------------------------------
-    // Synchronous — blocks until the workflow completes or times out
-    // -----------------------------------------------------------------------
-    static void runSyncExample(UwfEngineClient client) {
-        System.out.println("--- Synchronous execution ---");
+    // --- Submit + poll (recommended) ------------------------------------------
+
+    static void runSyncExample(UwfEngineClient client) throws InterruptedException {
+        System.out.println("--- Submit + poll ---");
 
         ExecuteWorkflowInput req = new ExecuteWorkflowInput();
         req.workflowId = WORKFLOW_ID;
-        req.inputData  = buildTransaction("TXN-" + shortId());
-        req.timeoutMs  = 20_000;  // 20 s — TAF response is usually < 2 s
+        req.inputData  = buildTransactionPayload("TXN-" + shortId());
 
-        ExecutionResult result = client.executeWorkflow(req);
-
-        System.out.println("run_id   : " + result.runId);
-        System.out.println("status   : " + result.status);
-        System.out.println("duration : " + result.durationMs + " ms");
-        if (result.output != null && !result.output.isEmpty()) {
-            System.out.println("output   : " + result.output);
-        }
-        if (result.error != null && !result.error.isBlank()) {
-            System.out.println("error    : " + result.error);
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Asynchronous — submit immediately, poll for status
-    // -----------------------------------------------------------------------
-    static void runAsyncExample(UwfEngineClient client) throws InterruptedException {
-        System.out.println("--- Asynchronous execution + polling ---");
-
-        AsyncExecuteInput req = new AsyncExecuteInput();
-        req.workflowId = WORKFLOW_ID;
-        req.inputData  = buildTransaction("TXN-" + shortId());
-
-        AsyncExecuteResponse submitted = client.asyncExecuteWorkflow(req);
-        System.out.println("submitted run_id : " + submitted.runId);
+        ExecutionResult submitted = client.executeWorkflow(req);
+        System.out.println("run_id    : " + submitted.runId);
 
         ExecutionStatus status = pollUntilDone(client, submitted.runId, 30_000);
-        System.out.println("final status     : " + status.status);
+        System.out.println("status    : " + status.status);
 
         if ("completed".equals(status.status)) {
             RunIdInput resultReq = new RunIdInput();
             resultReq.runId = submitted.runId;
             ExecutionResult result = client.getExecutionResult(resultReq);
-            System.out.println("output           : " + result.output);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> tafVerdict = result.result != null
+                ? (Map<String, Object>) result.result.get("result")
+                : null;
+            System.out.println("af_fraud    : " + (tafVerdict != null ? tafVerdict.get("af_fraud") : "n/a"));
+            System.out.println("af_blocked  : " + (tafVerdict != null ? tafVerdict.get("af_blocked") : "n/a"));
+            System.out.println("af_validated: " + (tafVerdict != null ? tafVerdict.get("af_validated") : "n/a"));
+        } else if (status.status != null && status.status.startsWith("fail")) {
+            System.out.println("error     : " + status.currentStep);
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Transaction payload — fields consumed by taf-proxy SubmitTransaction
-    // -----------------------------------------------------------------------
-    static Map<String, Object> buildTransaction(String txnId) {
+    // --- Asynchronous ----------------------------------------------------------
+
+    static void runAsyncExample(UwfEngineClient client) throws InterruptedException {
+        System.out.println("--- Async execution + polling ---");
+
+        ExecuteWorkflowInput req = new ExecuteWorkflowInput();
+        req.workflowId = WORKFLOW_ID;
+        req.inputData  = buildTransactionPayload("TXN-" + shortId());
+
+        ExecutionResult submitted = client.executeWorkflow(req);
+        System.out.println("run_id submitted: " + submitted.runId);
+
+        String runId = submitted.runId;
+        ExecutionStatus status = pollUntilDone(client, runId, 30_000);
+
+        System.out.println("final status: " + status.status);
+        if (status.currentStep != null) {
+            System.out.println("last step   : " + status.currentStep);
+        }
+
+        if ("completed".equals(status.status)) {
+            RunIdInput resultReq = new RunIdInput();
+            resultReq.runId = runId;
+            ExecutionResult result = client.getExecutionResult(resultReq);
+            // Engine wraps TAF output in result.result — navigate one level in
+            @SuppressWarnings("unchecked")
+            Map<String, Object> tafVerdict = result.result != null
+                ? (Map<String, Object>) result.result.get("result")
+                : null;
+            System.out.println("af_fraud    : " + (tafVerdict != null ? tafVerdict.get("af_fraud") : "n/a"));
+            System.out.println("af_blocked  : " + (tafVerdict != null ? tafVerdict.get("af_blocked") : "n/a"));
+            System.out.println("af_validated: " + (tafVerdict != null ? tafVerdict.get("af_validated") : "n/a"));
+        }
+    }
+
+    // --- Helpers ---------------------------------------------------------------
+
+    static Map<String, Object> buildTransactionPayload(String txnId) {
         Map<String, Object> p = new HashMap<>();
-        p.put("id",                 txnId);
-        p.put("transactionType",    "purchase");     // purchase | refund | withdrawal | transfer
-        p.put("amount",             5000);           // minor units (tiyn for KZT)
-        p.put("currency",           "KZT");
-        p.put("channel",            "pos");          // pos | atm | online | mobile
-        p.put("date",               Instant.now().toString());
-        p.put("sourceCardNumber",   "440000******1234");
-        p.put("sourceUserId",       "user-001");
-        p.put("merchantId",         "MERCH-0042");
-        p.put("merchantTerminalId", "TERM-0001");
-        p.put("sicCode",            "5411");         // ISO 18245 MCC
-        p.put("transactionCountry", "KZ");
-        p.put("transactionCity",    "Astana");
+        p.put("id",                   txnId);
+        p.put("transactionType",      "purchase");
+        p.put("amount",               5000);          // in minor units (tiyn)
+        p.put("currency",             "KZT");
+        p.put("channel",              "pos");
+        p.put("date",                 Instant.now().toString());
+        p.put("sourceCardNumber",     "440000******1234");
+        p.put("sourceUserId",         "user-001");
+        p.put("merchantId",           "MERCH-0042");
+        p.put("merchantTerminalId",   "TERM-0001");
+        p.put("sicCode",              "5411");
+        p.put("transactionCountry",   "KZ");
+        p.put("transactionCity",      "Astana");
         return p;
     }
 
-    // -----------------------------------------------------------------------
-    // Helpers
-    // -----------------------------------------------------------------------
     static ExecutionStatus pollUntilDone(UwfEngineClient client, String runId, long timeoutMs)
             throws InterruptedException {
         long deadline = System.currentTimeMillis() + timeoutMs;
@@ -130,6 +145,7 @@ public class TafPaymentExample {
             ExecutionStatus s = client.getExecutionStatus(req);
             System.out.println("  polling... status=" + s.status
                     + (s.currentStep != null ? " step=" + s.currentStep : ""));
+
             if ("completed".equals(s.status) || "failed".equals(s.status)) {
                 return s;
             }
@@ -139,22 +155,22 @@ public class TafPaymentExample {
     }
 
     static AuthProvider resolveAuth(String gateUrl) {
+        String authUrl      = System.getenv("VEX_AUTH_URL");
         String clientId     = System.getenv("VEX_CLIENT_ID");
         String clientSecret = System.getenv("VEX_CLIENT_SECRET");
         String staticToken  = System.getenv("VEX_TOKEN");
 
-        if (clientId != null && !clientId.isBlank()
-                && clientSecret != null && !clientSecret.isBlank()) {
-            System.out.println("[auth] M2M client_credentials (" + clientId + ")");
-            return new M2MAuth(gateUrl, clientId, clientSecret);
+        if (clientId != null && !clientId.isBlank() && clientSecret != null && !clientSecret.isBlank()) {
+            String tokenEndpoint = (authUrl != null && !authUrl.isBlank()) ? authUrl : gateUrl;
+            System.out.println("[auth] M2M client_credentials (" + clientId + " @ " + tokenEndpoint + ")");
+            return new M2MAuth(tokenEndpoint, clientId, clientSecret);
         }
         if (staticToken != null && !staticToken.isBlank()) {
             System.out.println("[auth] static Bearer token");
             return new BearerAuth(staticToken);
         }
-        System.err.println("ERROR: set VEX_CLIENT_ID+VEX_CLIENT_SECRET or VEX_TOKEN");
-        System.exit(1);
-        return null;
+        System.out.println("[auth] no auth (endpoint requires no Authorization header)");
+        return NoAuth.INSTANCE;
     }
 
     static String requireEnv(String key) {
