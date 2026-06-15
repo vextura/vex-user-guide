@@ -1,6 +1,6 @@
 # 101 — Execute a Workflow with the Java SDK
 
-**SDK:** `ai.vextura:uwf-engine-sdk-java:1.2.4`
+**SDK:** `ai.vextura:uwf-engine-sdk-java:1.2.6`
 
 ---
 
@@ -39,8 +39,8 @@ Your app           vex-gate             workflow-api
     │   client_id + client_secret           │
     │<── { access_token, expires_in: 3600 }─│
     │                                       │
-    │── GET /workflow/definitions ─ Bearer──>│─→ workflow-api
-    │── POST /workflow/executions/{id} ─────>│─→ workflow-api
+    │── GET /api/v1/workflows ─── Bearer───>│─→ workflow-api
+    │── POST /api/v1/workflows/{id}/execute >│─→ workflow-api
     │                                       │
     │  (token auto-refreshes 60s before expiry)
 ```
@@ -56,35 +56,50 @@ Your app           vex-gate             workflow-api
 <dependency>
     <groupId>ai.vextura</groupId>
     <artifactId>uwf-engine-sdk-java</artifactId>
-    <version>1.2.4</version>
+    <version>1.2.6</version>
 </dependency>
 ```
 
 **Gradle:**
 ```groovy
-implementation 'ai.vextura:uwf-engine-sdk-java:1.2.4'
+implementation 'ai.vextura:uwf-engine-sdk-java:1.2.6'
 ```
 
 ---
 
 ## Step 2 — Create the client
 
+**Option A — M2M auth** (when your admin provides client credentials):
+
 ```java
 import ai.vextura.uwf_engine.UwfEngineClient;
 import ai.vextura.uwf_engine.runtime.M2MAuth;
 
-// All three values come from your Vextura admin — never hardcode them.
-// M2MAuth calls <gateUrl>/auth/token to get a JWT, then caches and auto-refreshes it.
-String gateUrl = System.getenv("VEX_GATE_URL");
+String gateUrl = System.getenv("VEX_GATE_URL");   // vex-gate URL
+String authUrl = System.getenv("VEX_AUTH_URL");    // auth service URL (if separate from gate)
 
 M2MAuth auth = new M2MAuth(
-    gateUrl,
+    authUrl != null ? authUrl : gateUrl,
     System.getenv("VEX_CLIENT_ID"),
     System.getenv("VEX_CLIENT_SECRET")
 );
 
 UwfEngineClient client = UwfEngineClient.withEndpoint(gateUrl, auth);
 ```
+
+**Option B — No auth** (when your admin says the engine is directly accessible):
+
+```java
+import ai.vextura.uwf_engine.UwfEngineClient;
+import ai.vextura.uwf_engine.runtime.NoAuth;
+
+UwfEngineClient client = UwfEngineClient.withEndpoint(
+    System.getenv("VEX_GATE_URL"),
+    NoAuth.INSTANCE
+);
+```
+
+Ask your Vextura admin which option applies to your deployment.
 
 ---
 
@@ -167,8 +182,7 @@ Final status       : completed
 | `client.healthCheck()` | Check engine + NATS + Redis status |
 | `client.listWorkflows()` | List all registered workflow definitions |
 | `client.getWorkflow(req)` | Get a single workflow definition by ID |
-| `client.executeWorkflow(req)` | Execute synchronously, returns runId |
-| `client.asyncExecuteWorkflow(req)` | Execute without waiting |
+| `client.executeWorkflow(req)` | Submit workflow, returns runId immediately |
 | `client.getExecutionStatus(req)` | Poll execution status by runId |
 | `client.listExecutions(req)` | List past executions (paginated) |
 | `client.cancelExecution(req)` | Cancel a running execution |
@@ -180,6 +194,7 @@ Final status       : completed
 | Error | Cause | Fix |
 |-------|-------|-----|
 | `VEX_GATE_URL is required` | Env var not set | Set all three env vars from your admin |
+| `M2MAuth: token request failed (404)` | Engine has no auth endpoint — use `NoAuth` | Switch to Option B (NoAuth) — your deployment needs no credentials |
 | `M2MAuth: token request failed (400)` | Wrong grant or bad credentials | Verify `VEX_CLIENT_ID` / `VEX_CLIENT_SECRET` with your admin |
 | `M2MAuth: token request failed (401)` | Invalid credentials | Re-confirm credentials with your admin |
 | `Connection refused on VEX_GATE_URL` | Wrong URL or no network access | Confirm you're on the cluster network and `VEX_GATE_URL` is correct |
