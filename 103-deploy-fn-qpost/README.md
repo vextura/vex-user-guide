@@ -26,7 +26,7 @@
 | `vexctl` ≥ 1.4 | `vexctl version` |
 | `docker` | `docker info` |
 | vexctl authenticated | `vexctl auth status` |
-| Local stack running (local flow only) | `vexctl fn gate health` |
+| Local stack running (local flow only) | `curl -s http://localhost:8080/health \| jq .status` |
 
 ---
 
@@ -447,8 +447,10 @@ curl -s -H "Authorization: Bearer $TOKEN" http://$GATE/demo/version | jq .
 
 Gate hasn't picked up the routes yet. Wait 30 seconds and retry. If still 404:
 ```shell
-vexctl gate routes list --tenant vextura   # verify routes are registered
-vexctl fn gate health                      # verify gate is up
+# verify routes are registered
+vexctl gate routes list --tenant vextura --config-url http://localhost:8080/config --token $(vexctl auth token)
+# verify gate is up and route count
+curl -s http://localhost:8080/health | jq '{status, routes}'
 ```
 
 **401 Unauthorized**
