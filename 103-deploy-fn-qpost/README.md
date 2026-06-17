@@ -23,9 +23,10 @@
 
 | Tool | Check |
 |---|---|
-| `vexctl` ≥ 1.4 | `vexctl version` |
+| `vexctl` ≥ 1.4 | `vexctl --help` |
 | `docker` | `docker info` |
-| vexctl authenticated | `vexctl auth status` |
+| vexctl authenticated | `vexctl auth token >/dev/null && echo ok` |
+| `jq` | `jq --version` |
 | Local stack running (local flow only) | `curl -s http://localhost:8080/health \| jq .status` |
 
 ---
@@ -293,25 +294,33 @@ Use this flow to deploy to any remote Vextura cluster. If the cluster is air-gap
 
 ### B0 — Resolve cluster variables
 
-Every command in this flow uses four values. Look them up once and export them as shell variables — never hardcode them.
+Every command in this flow uses four values. Look them up once, export as shell variables, and copy the registry into `vex.yaml`.
 
 ```shell
-# List registered clusters and pick yours
+# 1. List registered clusters
 vexctl cluster list
 
-# Export the four variables for your cluster
-export CLUSTER=<cluster-id>            # e.g. qzp, beta, prod
-export REGION=$(vexctl cluster get $CLUSTER --field region)
-export REGISTRY=$(vexctl cluster get $CLUSTER --field registry)
-export TENANT=vextura                  # or your tenant slug
+# 2. Pick your cluster ID and resolve its registry + gate URL
+export CLUSTER=<cluster-id>   # e.g. qzp-kz-north-1, kz-north-1, beta
+
+CLUSTER_JSON=$(vexctl cluster list --output json | jq -r ".[] | select(.id == \"$CLUSTER\")")
+export REGISTRY=$(echo "$CLUSTER_JSON" | jq -r '"\(.registry_host):\(.registry_port)"')
+export GATE_URL=$(echo "$CLUSTER_JSON"  | jq -r '"http://\(.gate_host):\(.gate_port)"')
+export TENANT=vextura          # your tenant slug
+
+echo "CLUSTER:  $CLUSTER"
+echo "REGISTRY: $REGISTRY"
+echo "GATE_URL: $GATE_URL"
 ```
 
-> If `vexctl cluster get` is not available, look up values from the cluster profile:
-> ```shell
-> vexctl cluster list --output json | jq '.[] | select(.id == "'$CLUSTER'") | {region, registry}'
+> **Example output for `qzp-kz-north-1`:**
+> ```
+> CLUSTER:  qzp-kz-north-1
+> REGISTRY: 172.30.75.78:9080
+> GATE_URL: http://172.30.75.94:8080
 > ```
 
-Once set, copy these into `vex.yaml` so you never pass flags again:
+Now copy the registry into `vex.yaml` so all commands run with zero flags:
 
 ```yaml
 # hello-fn/vex.yaml
@@ -321,7 +330,7 @@ registry: <REGISTRY>/<TENANT>   # e.g. 172.30.75.78:9080/vextura
 tag: v1.0.0
 ```
 
-With these in `vex.yaml`, all commands below work with zero flags (except `--cluster`).
+With these set, all commands below work with zero flags (except `--cluster`).
 
 ### B1 — Bootstrap base images (one-time, air-gapped clusters only)
 
@@ -405,16 +414,17 @@ Wait 30 seconds for the gate to pick up the new routes.
 
 ### B6 — Test
 
+`$GATE_URL` was exported in B0 from `vexctl cluster list --output json`.
+
 ```shell
-GATE=$(vexctl rip resolve vex-gate $REGION)
 TOKEN=$(vexctl auth token --cluster $CLUSTER)
 
-curl -s -H "Authorization: Bearer $TOKEN" http://$GATE/demo/hello | jq .
+curl -s -H "Authorization: Bearer $TOKEN" $GATE_URL/demo/hello | jq .
 curl -s -X POST -H "Authorization: Bearer $TOKEN" \
      -H "Content-Type: application/json" \
      -d '{"ping": "pong"}' \
-     http://$GATE/demo/echo | jq .
-curl -s -H "Authorization: Bearer $TOKEN" http://$GATE/demo/version | jq .
+     $GATE_URL/demo/echo | jq .
+curl -s -H "Authorization: Bearer $TOKEN" $GATE_URL/demo/version | jq .
 ```
 
 ---
@@ -466,7 +476,7 @@ Your handler started an HTTP server or blocked on a long operation without the c
 
 **`docker build` fails on air-gapped node**
 
-Base images missing from Harbor. Re-run Phase B0 for the missing tag.
+Base images missing from Harbor. Re-run B1 (bootstrap base images) for the missing tag.
 
 **`vexctl fn publish` — image not found on vex-fn**
 
