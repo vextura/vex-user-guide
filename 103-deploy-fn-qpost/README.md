@@ -45,9 +45,11 @@ Create `vex.yaml` at the project root — this is what makes all commands work w
 # hello-fn/vex.yaml
 smithy: smithy/hello.smithy
 tenant: vextura
+# registry: 172.30.75.78:9080/vextura   # uncomment for remote cluster
+# tag: v1.0.0                            # uncomment to pin a version
 ```
 
-> **Why `vex.yaml`?** Every `vexctl fn` and `vexctl gate` command reads this file automatically. You never pass `--smithy` or `--tenant` again.
+> **Why `vex.yaml`?** Every `vexctl fn` and `vexctl gate` command reads this file automatically. You never pass `--smithy`, `--tenant`, `--registry`, or `--tag` again. The image reference (`registry/fn-name:tag`) is computed at build/publish time from these values — the Smithy never mentions a registry or tag.
 
 ---
 
@@ -74,7 +76,7 @@ service HelloService {
 // ─── HelloGreet ──────────────────────────────────────────────────────────────
 
 /// Returns a greeting message.
-@vexFn(name: "hello-fn", tenant: "vextura", image: "hello-fn:latest")
+@vexFn(name: "hello-fn", tenant: "vextura")
 @vexRoute(path: "/demo/hello", method: "GET", auth: "jwt")
 operation HelloGreet {
     output: HelloGreetOutput
@@ -89,7 +91,7 @@ structure HelloGreetOutput {
 // ─── HelloEcho ───────────────────────────────────────────────────────────────
 
 /// Echoes the request body — useful for integration testing.
-@vexFn(name: "hello-fn", tenant: "vextura", image: "hello-fn:latest")
+@vexFn(name: "hello-fn", tenant: "vextura")
 @vexRoute(path: "/demo/echo", method: "POST", auth: "jwt")
 operation HelloEcho {
     input:  HelloEchoInput
@@ -102,7 +104,7 @@ structure HelloEchoOutput { body: Document }
 // ─── HelloVersion ────────────────────────────────────────────────────────────
 
 /// Returns service version metadata.
-@vexFn(name: "hello-fn", tenant: "vextura", image: "hello-fn:latest")
+@vexFn(name: "hello-fn", tenant: "vextura")
 @vexRoute(path: "/demo/version", method: "GET", auth: "jwt")
 operation HelloVersion {
     output: HelloVersionOutput
@@ -118,9 +120,9 @@ structure HelloVersionOutput {
 **Key rules in this Smithy:**
 
 - `@vexRoute` — not `@http`. Routes are dispatched via NATS (`vexedge.vextura.fn.hello-fn`), not HTTP proxy.
-- No `targetUrl` on `@vexGate` — that is only for HTTP-proxy services like `vex-iam`. For fn-backed services, the gate resolves the fn by name via the fn manifest. Adding `targetUrl` here will break routing.
-- Static paths only (`/demo/hello`, `/demo/echo`, `/demo/version`). VEXBLUE rule: static before parameterised.
-- `image: "hello-fn:latest"` — local tag. Remote deploys override the tag via `--tag` flag.
+- No `targetUrl` on `@vexGate` — only for HTTP-proxy services like `vex-iam`. For fn-backed services the gate resolves by fn name. Adding `targetUrl` breaks routing.
+- **No `image:` field** — the image reference (`registry/hello-fn:tag`) is computed at publish time from `vex.yaml` + flags. The Smithy is environment-agnostic and never changes between local dev and production.
+- Static paths only. VEXBLUE rule: static before parameterised.
 
 ---
 
@@ -339,34 +341,21 @@ Your `handler.go` is not touched.
 vexctl fn build --registry 172.30.75.78:9080/vextura --tag v1.0.0 --push
 ```
 
-`vexctl` runs `docker build` then `docker push` for each fn. The built image is:
-```
-172.30.75.78:9080/vextura/hello-fn:v1.0.0
-```
+`vexctl` constructs the image reference as `registry/fn-name:tag` — `172.30.75.78:9080/vextura/hello-fn:v1.0.0` — without touching the Smithy. The same Smithy works from local dev to production.
 
-> **Cross-platform note:** If your workstation is Apple Silicon (arm64) and the cluster runs amd64, add `--platform linux/amd64`. This triggers `docker buildx build` automatically.
+> **Cross-platform note:** Apple Silicon (arm64) workstation → amd64 cluster, add `--platform linux/amd64`:
 >
 > ```shell
 > vexctl fn build --registry 172.30.75.78:9080/vextura --tag v1.0.0 --platform linux/amd64 --push
 > ```
 
-### B3 — Update the Smithy image tag
-
-For production deployments, pin the image tag. Edit `smithy/hello.smithy`:
-
-```smithy
-@vexFn(name: "hello-fn", tenant: "vextura", image: "172.30.75.78:9080/vextura/hello-fn:v1.0.0")
-```
-
-Do this for all three operations (`HelloGreet`, `HelloEcho`, `HelloVersion`).
-
-### B4 — Register the fn manifest
+### B3 — Register the fn manifest
 
 ```shell
 vexctl fn publish --registry 172.30.75.78:9080/vextura --tag v1.0.0 --cluster qzp
 ```
 
-Pushes the fn manifest to `vex-config` on the remote cluster. `vex-fn` will pull and start the new image.
+Derives the image as `172.30.75.78:9080/vextura/hello-fn:v1.0.0` and pushes the manifest to `vex-config` on the remote cluster. The Smithy is not read for the image — `registry/name:tag` is always computed from the flags and vex.yaml.
 
 ### B5 — Deploy routes
 
@@ -405,7 +394,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://$GATE/demo/version | jq .
 | `handler.go` logic only | `vexctl fn build` → `vexctl fn publish` → wait 30s |
 | Added a new operation | `vexctl fn generate` → edit `handler.go` → `vexctl fn build` → `vexctl fn publish` → `vexctl gate deploy` → wait 30s |
 | Route paths / auth changed | `vexctl gate deploy` → wait 30s |
-| Tag bump for production | `vexctl fn build --tag v1.x.x --push` → update Smithy image tag → `vexctl fn publish --tag v1.x.x` → wait 30s |
+| Tag bump for production | `vexctl fn build --tag v1.x.x --push` → `vexctl fn publish --tag v1.x.x` → wait 30s |
 
 ### Re-generation is safe
 
