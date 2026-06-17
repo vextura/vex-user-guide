@@ -3,9 +3,9 @@
 > This guide walks the complete path from a blank directory to a live, JWT-protected HTTP endpoint backed by a serverless function. It covers two flows:
 >
 > - **Local dev** — build and test against your local Vextura stack
-> - **Remote cluster** — deploy to the Qazpost air-gapped cluster (`kz-north-1`)
+> - **Remote cluster** — deploy to any registered cluster (air-gapped or internet-connected)
 >
-> Every command uses `vexctl`. No raw `curl`, no hardcoded IPs, no admin keys in your terminal.
+> Every command uses `vexctl`. No raw `curl`, no hardcoded IPs, no admin keys in your terminal. Cluster-specific values (registry, region, cluster ID) are resolved at runtime — the same Smithy and `vex.yaml` work across all clusters.
 
 **What you will build:** A three-operation function (`hello-fn`) exposed through `vex-gate`:
 
@@ -287,96 +287,128 @@ Expected responses:
 
 ---
 
-## Flow B — Remote Cluster (Qazpost Air-Gapped)
+## Flow B — Remote Cluster (Air-Gapped)
 
-Use this flow to deploy to the Qazpost production cluster (`kz-north-1`). The cluster's Docker nodes cannot pull from Docker Hub — all images must come from the cluster's Harbor registry.
+Use this flow to deploy to any remote Vextura cluster. If the cluster is air-gapped (no outbound Docker Hub access), follow the base image bootstrap step — otherwise skip it.
 
-**Cluster quick-reference** (resolved at runtime — do not hardcode):
+### B0 — Resolve cluster variables
 
-| What | How to get it |
-|---|---|
-| Gate endpoint | `vexctl rip resolve vex-gate kz-north-1` |
-| Registry | `172.30.75.78:9080` (Harbor) |
-| Cluster ID | `qzp` (vexctl profile or `--cluster qzp`) |
-| Tenant | `vextura` |
-
-### B0 — Bootstrap Harbor base images (one-time)
-
-The Dockerfile uses `golang:1.25-alpine` (builder) and `alpine:3.19` (runtime). These must be in Harbor before the first build. Run this once per base image tag — skip on subsequent deployments.
+Every command in this flow uses four values. Look them up once and export them as shell variables — never hardcode them.
 
 ```shell
-# Open a dome shell on a node with outbound internet access
-vexctl dome shell run --target qzp-kz-north-1-ast-1-c02-plt-core-01
+# List registered clusters and pick yours
+vexctl cluster list
 
-# Inside the dome shell:
-docker login 172.30.75.78:9080 --username admin
+# Export the four variables for your cluster
+export CLUSTER=<cluster-id>            # e.g. qzp, beta, prod
+export REGION=$(vexctl cluster get $CLUSTER --field region)
+export REGISTRY=$(vexctl cluster get $CLUSTER --field registry)
+export TENANT=vextura                  # or your tenant slug
+```
+
+> If `vexctl cluster get` is not available, look up values from the cluster profile:
+> ```shell
+> vexctl cluster list --output json | jq '.[] | select(.id == "'$CLUSTER'") | {region, registry}'
+> ```
+
+Once set, copy these into `vex.yaml` so you never pass flags again:
+
+```yaml
+# hello-fn/vex.yaml
+smithy: smithy/hello.smithy
+tenant: vextura
+registry: <REGISTRY>/<TENANT>   # e.g. 172.30.75.78:9080/vextura
+tag: v1.0.0
+```
+
+With these in `vex.yaml`, all commands below work with zero flags (except `--cluster`).
+
+### B1 — Bootstrap base images (one-time, air-gapped clusters only)
+
+Skip this step if the cluster can pull from Docker Hub directly.
+
+The Dockerfile needs `golang:1.25-alpine` (builder) and `alpine:3.19` (runtime). Find a node on the cluster that has internet access, open a dome shell, and push the images to the cluster registry.
+
+```shell
+# Find a node with internet access — typically the bastion or edge node
+vexctl dome facts gather --target $CLUSTER | grep -i internet
+
+# Open a dome shell on that node
+vexctl dome shell run --target <device-id>
+
+# Inside the dome shell — push base images to the cluster registry
+docker login $REGISTRY --username admin
 docker pull golang:1.25-alpine
-docker tag  golang:1.25-alpine 172.30.75.78:9080/library/golang:1.25-alpine
-docker push 172.30.75.78:9080/library/golang:1.25-alpine
+docker tag  golang:1.25-alpine $REGISTRY/library/golang:1.25-alpine
+docker push $REGISTRY/library/golang:1.25-alpine
 
 docker pull alpine:3.19
-docker tag  alpine:3.19 172.30.75.78:9080/library/alpine:3.19
-docker push 172.30.75.78:9080/library/alpine:3.19
+docker tag  alpine:3.19 $REGISTRY/library/alpine:3.19
+docker push $REGISTRY/library/alpine:3.19
 
 exit
 ```
 
-### B1 — Generate stubs with the air-gapped base registry
+> **One-time only.** Once `golang:1.25-alpine` and `alpine:3.19` are in the cluster registry, skip this step for all future deployments of any function.
 
-On your workstation, regenerate so the Dockerfile pulls from Harbor instead of Docker Hub:
+### B2 — Generate stubs for air-gapped build
 
-```shell
-vexctl fn generate --base-registry 172.30.75.78:9080/library
-```
-
-This rewrites the `FROM` lines in the generated `Dockerfile`:
-- `FROM 172.30.75.78:9080/library/golang:1.25-alpine AS builder`
-- `FROM 172.30.75.78:9080/library/alpine:3.19`
-
-Your `handler.go` is not touched.
-
-### B2 — Build & push to Harbor
+On your workstation, regenerate so the Dockerfile pulls from the cluster registry instead of Docker Hub:
 
 ```shell
-vexctl fn build --registry 172.30.75.78:9080/vextura --tag v1.0.0 --push
+vexctl fn generate --base-registry $REGISTRY/library
 ```
 
-`vexctl` constructs the image reference as `registry/fn-name:tag` — `172.30.75.78:9080/vextura/hello-fn:v1.0.0` — without touching the Smithy. The same Smithy works from local dev to production.
+This rewrites the `FROM` lines in the generated `Dockerfile` to use `$REGISTRY/library/golang:1.25-alpine` etc. Your `handler.go` is not touched.
 
-> **Cross-platform note:** Apple Silicon (arm64) workstation → amd64 cluster, add `--platform linux/amd64`:
->
-> ```shell
-> vexctl fn build --registry 172.30.75.78:9080/vextura --tag v1.0.0 --platform linux/amd64 --push
-> ```
+> **Internet-connected cluster:** skip this step and use `vexctl fn generate` without `--base-registry`. The Dockerfile will pull directly from Docker Hub during build.
 
-### B3 — Register the fn manifest
+### B3 — Build & push
 
 ```shell
-vexctl fn publish --registry 172.30.75.78:9080/vextura --tag v1.0.0 --cluster qzp
+vexctl fn build --push
 ```
 
-Derives the image as `172.30.75.78:9080/vextura/hello-fn:v1.0.0` and pushes the manifest to `vex-config` on the remote cluster. The Smithy is not read for the image — `registry/name:tag` is always computed from the flags and vex.yaml.
-
-### B4 — Deploy routes
+If `registry` and `tag` are set in `vex.yaml`, no flags needed. Otherwise:
 
 ```shell
-vexctl gate deploy --cluster qzp
+vexctl fn build --registry $REGISTRY/$TENANT --tag v1.0.0 --push
 ```
 
-Reads `vex.yaml`, generates the route table from the Smithy, **merges** it into `vex-config` on the remote cluster.
+`vexctl` constructs `registry/fn-name:tag` and runs `docker build` then `docker push`. The Smithy is never touched.
+
+> **Cross-platform:** Apple Silicon (arm64) workstation targeting an amd64 cluster — add `--platform linux/amd64`. `vexctl` switches to `docker buildx build` automatically.
+
+### B4 — Register the fn manifest
+
+```shell
+vexctl fn publish --cluster $CLUSTER
+```
+
+Or with explicit flags if not set in `vex.yaml`:
+
+```shell
+vexctl fn publish --registry $REGISTRY/$TENANT --tag v1.0.0 --cluster $CLUSTER
+```
+
+Derives the image as `registry/hello-fn:tag` and pushes the fn manifest to `vex-config` on the target cluster. Never reads the `image:` field from Smithy.
+
+### B5 — Deploy routes
+
+```shell
+vexctl gate deploy --cluster $CLUSTER
+```
+
+Merges the route table into `vex-config` on the target cluster. Safe to re-run — never wipes routes from other services.
 
 Wait 30 seconds for the gate to pick up the new routes.
 
-### B5 — Test against the cluster gate
-
-Resolve the gate endpoint:
+### B6 — Test
 
 ```shell
-GATE=$(vexctl rip resolve vex-gate kz-north-1)
-TOKEN=$(vexctl auth token --cluster qzp)
-```
+GATE=$(vexctl rip resolve vex-gate $REGION)
+TOKEN=$(vexctl auth token --cluster $CLUSTER)
 
-```shell
 curl -s -H "Authorization: Bearer $TOKEN" http://$GATE/demo/hello | jq .
 curl -s -X POST -H "Authorization: Bearer $TOKEN" \
      -H "Content-Type: application/json" \
@@ -438,7 +470,7 @@ Base images missing from Harbor. Re-run Phase B0 for the missing tag.
 
 The image tag in the fn manifest doesn't match what's in the registry. Confirm the image pushed successfully:
 ```shell
-docker pull 172.30.75.78:9080/vextura/hello-fn:v1.0.0
+docker pull $REGISTRY/$TENANT/hello-fn:v1.0.0
 ```
 
 **Routes wiped after `gate deploy`**
