@@ -357,7 +357,7 @@ vexctl fn publish --registry 172.30.75.78:9080/vextura --tag v1.0.0 --cluster qz
 
 Derives the image as `172.30.75.78:9080/vextura/hello-fn:v1.0.0` and pushes the manifest to `vex-config` on the remote cluster. The Smithy is not read for the image — `registry/name:tag` is always computed from the flags and vex.yaml.
 
-### B5 — Deploy routes
+### B4 — Deploy routes
 
 ```shell
 vexctl gate deploy --cluster qzp
@@ -367,7 +367,7 @@ Reads `vex.yaml`, generates the route table from the Smithy, **merges** it into 
 
 Wait 30 seconds for the gate to pick up the new routes.
 
-### B6 — Test against the cluster gate
+### B5 — Test against the cluster gate
 
 Resolve the gate endpoint:
 
@@ -415,8 +415,8 @@ curl -s -H "Authorization: Bearer $TOKEN" http://$GATE/demo/version | jq .
 
 Gate hasn't picked up the routes yet. Wait 30 seconds and retry. If still 404:
 ```shell
-vexctl fn list routes --tenant vextura   # verify routes are registered
-vexctl fn gate health                    # verify gate is up
+vexctl gate routes list --tenant vextura   # verify routes are registered
+vexctl fn gate health                      # verify gate is up
 ```
 
 **401 Unauthorized**
