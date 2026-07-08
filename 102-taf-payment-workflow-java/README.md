@@ -55,7 +55,7 @@ The Java SDK's `M2MAuth` handles refresh automatically; use `BearerAuth` for sta
 <dependency>
     <groupId>ai.vextura</groupId>
     <artifactId>uwf-engine-sdk-java</artifactId>
-    <version>1.2.6</version>
+    <version>1.2.7</version>
 </dependency>
 ```
 
