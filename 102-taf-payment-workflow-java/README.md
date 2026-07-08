@@ -68,14 +68,14 @@ The Java SDK's `M2MAuth` handles refresh automatically; use `BearerAuth` for sta
 ```yaml
 vex:
   gate:
-    url: http://172.30.75.94:8080/workflow
+    url: http://172.30.75.94:8080
   auth:
     url: http://172.30.75.94:8080
     client-id: admin
     client-secret: <qzp-admin-password>
 ```
 
-The engine SDK expects `gate.url` to include the `/workflow` prefix — its generated methods target the smithy-declared paths (`/executions/{id}`, `/executions`) and the gate strips `/workflow` before proxying.
+`vex.gate.url` is the bare gate root (no path suffix). The SDK's generated methods emit `/workflow/executions/{id}` themselves — the gate is what strips the `/workflow` prefix before proxying to `unified-workflow-go`. Verified 2026-07-08 by running the example from the Qazpost bastion using `ai.vextura:uwf-engine-sdk-java:1.2.7` off Maven Central — three transactions returned `verdict=allow`, `verdict=review`, `verdict=block` matching the rule-set expectations.
 
 ## Request payload
 
@@ -202,7 +202,11 @@ public class TafPaymentAdapter {
                 resultReq.runId = runId;
                 ExecutionResult result = client.getExecutionResult(resultReq);
 
-                Map<String, Object> data = result.result != null ? result.result : Map.of();
+                // Wire shape: { result: { result: { verdict, per_rule, … } } }
+                // ExecutionResult.result is the outer map; the actual verdict
+                // fields live one level deeper because the workflow engine wraps
+                // predicate-eval's output in a step-result envelope.
+                Map<String, Object> data = unwrapVerdict(result.result);
                 String verdict = (String) data.getOrDefault("verdict", "unknown");
                 Object perRule = data.get("per_rule");
                 log.info("taf verdict orderId={} request_id={} verdict={} per_rule={}",
@@ -232,6 +236,13 @@ public class TafPaymentAdapter {
             Thread.sleep(POLL_INTERVAL_MS);
         }
         throw new RuntimeException("TAF timed out runId=" + runId);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> unwrapVerdict(Map<String, Object> outer) {
+        if (outer == null) return Map.of();
+        Object inner = outer.get("result");
+        return inner instanceof Map ? (Map<String, Object>) inner : outer;
     }
 
     public static class TafResult {

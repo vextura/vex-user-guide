@@ -77,8 +77,8 @@ public class TafPaymentExample {
         if (status.currentStep != null && !status.currentStep.isEmpty()) {
             System.out.println("last step : " + status.currentStep);
         }
-        if (status.error != null && !status.error.isEmpty()) {
-            System.out.println("error     : " + status.error);
+        if (status.progress != null) {
+            System.out.println("progress  : " + status.progress + "%");
         }
 
         if (!"completed".equals(status.status)) {
@@ -88,10 +88,21 @@ public class TafPaymentExample {
         RunIdInput resultReq = new RunIdInput();
         resultReq.runId = ack.runId;
         ExecutionResult result = client.getExecutionResult(resultReq);
-        Map<String, Object> data = result.result != null ? result.result : Map.of();
-        System.out.println("verdict   : " + data.getOrDefault("verdict", "unknown"));
-        System.out.println("ruleset_id: " + data.getOrDefault("ruleset_id", "?"));
-        System.out.println("per_rule  : " + data.getOrDefault("per_rule", "[]"));
+        // Wire shape: { result: { result: { verdict, per_rule, ruleset_id, … } } }
+        // ExecutionResult.result maps the outer `result` — the actual verdict
+        // fields live one level deeper (the workflow engine wraps predicate-eval's
+        // output in a step-result envelope).
+        Map<String, Object> verdict = unwrapVerdict(result.result);
+        System.out.println("verdict   : " + verdict.getOrDefault("verdict", "unknown"));
+        System.out.println("ruleset_id: " + verdict.getOrDefault("ruleset_id", "?"));
+        System.out.println("per_rule  : " + verdict.getOrDefault("per_rule", "[]"));
+    }
+
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> unwrapVerdict(Map<String, Object> outer) {
+        if (outer == null) return Map.of();
+        Object inner = outer.get("result");
+        return inner instanceof Map ? (Map<String, Object>) inner : outer;
     }
 
     // taf-payment-v1 expects a wrapped input: { input_data: { request_id, format_id, tx: {...} } }
