@@ -2,29 +2,34 @@ package ai.vextura.taf.example;
 
 import ai.vextura.uwf_engine.UwfEngineClient;
 import ai.vextura.uwf_engine.models.*;
+import ai.vextura.uwf_engine.runtime.AuthProvider;
 import ai.vextura.uwf_engine.runtime.BearerAuth;
 import ai.vextura.uwf_engine.runtime.M2MAuth;
-import ai.vextura.uwf_engine.runtime.NoAuth;
-import ai.vextura.uwf_engine.runtime.AuthProvider;
 
-import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
 /**
- * Demonstrates submitting a payment transaction to the TAF anti-fraud workflow
- * using the Vextura UWF Engine SDK.
+ * Submits a payment transaction to the TAF anti-fraud workflow on Qazpost and
+ * prints the resulting verdict. Verified against the qzp-kz-north-1 cluster on
+ * 2026-07-08.
  *
- * Environment variables:
- *   VEX_GATE_URL      — base URL of the workflow engine (required)
- *   VEX_AUTH_URL      — base URL of the auth service for M2M (optional; defaults to VEX_GATE_URL)
- *   VEX_CLIENT_ID     — M2M client ID (optional)
- *   VEX_CLIENT_SECRET — M2M client secret (optional, paired with VEX_CLIENT_ID)
- *   VEX_TOKEN         — static Bearer token (optional fallback)
+ * The workflow ID is {@code taf-payment-v1}. It runs three steps:
  *
- * If none of the auth variables are set the client sends requests with no
- * Authorization header — suitable for engine endpoints that require no auth.
+ *   evaluate  → predicate-eval.EvaluatePredicates
+ *   route     → choice on verdict (block/review → create-incident, allow → end)
+ *   create-incident → incident-trigger.TriggerFromVerdict (skip on failure)
+ *
+ * Environment variables (required — the workflow gate always demands a JWT):
+ *
+ *   VEX_GATE_URL       base URL of the workflow gate (e.g. http://172.30.75.94:8080/workflow)
+ *   VEX_AUTH_URL       base URL for token endpoint     (e.g. http://172.30.75.94:8080)
+ *   VEX_CLIENT_ID      client_credentials client id   (e.g. "admin")
+ *   VEX_CLIENT_SECRET  client_credentials client secret (Qazpost admin password)
+ *
+ * Alternate: skip client-credentials and pre-issue a token, then set
+ * VEX_TOKEN and omit VEX_CLIENT_ID/SECRET.
  *
  * Run:
  *   mvn compile exec:java
@@ -32,6 +37,8 @@ import java.util.UUID;
 public class TafPaymentExample {
 
     static final String WORKFLOW_ID = "taf-payment-v1";
+    // Registered format on Qazpost (binance-pay) — active ruleset attached.
+    static final String FORMAT_ID = "fmt_01kwc389zs8rapcqz3mf7yantx";
 
     public static void main(String[] args) throws Exception {
         String gateUrl = requireEnv("VEX_GATE_URL");
@@ -39,117 +46,85 @@ public class TafPaymentExample {
 
         UwfEngineClient client = UwfEngineClient.withEndpoint(gateUrl, auth);
 
-        System.out.println("=== TAF Payment Workflow Example ===");
-        System.out.println("Gate  : " + gateUrl);
-        System.out.println("Workflow: " + WORKFLOW_ID);
+        System.out.println("=== TAF Payment Workflow — Qazpost ===");
+        System.out.println("Gate      : " + gateUrl);
+        System.out.println("Workflow  : " + WORKFLOW_ID);
+        System.out.println("Format ID : " + FORMAT_ID);
         System.out.println();
 
-        runSyncExample(client);
+        runCase(client, "safe-small", "charge", "880101300123", 50_000L, "CTR-1");
         System.out.println();
-        runAsyncExample(client);
+        runCase(client, "review-hi",  "charge", "880101300123", 2_000_000L, "CTR-2");
+        System.out.println();
+        runCase(client, "block-payout-nocontract", "payout", "880101300123", 500_000L, "");
     }
 
-    // --- Submit + poll (recommended) ------------------------------------------
-
-    static void runSyncExample(UwfEngineClient client) throws InterruptedException {
-        System.out.println("--- Submit + poll ---");
-
-        ExecuteWorkflowInput req = new ExecuteWorkflowInput();
-        req.workflowId = WORKFLOW_ID;
-        req.inputData  = buildTransactionPayload("TXN-" + shortId());
-
-        ExecutionResult submitted = client.executeWorkflow(req);
-        System.out.println("run_id    : " + submitted.runId);
-
-        ExecutionStatus status = pollUntilDone(client, submitted.runId, 30_000);
-        System.out.println("status    : " + status.status);
-
-        if ("completed".equals(status.status)) {
-            RunIdInput resultReq = new RunIdInput();
-            resultReq.runId = submitted.runId;
-            ExecutionResult result = client.getExecutionResult(resultReq);
-            @SuppressWarnings("unchecked")
-            Map<String, Object> tafVerdict = result.result != null
-                ? (Map<String, Object>) result.result.get("result")
-                : null;
-            System.out.println("af_fraud    : " + (tafVerdict != null ? tafVerdict.get("af_fraud") : "n/a"));
-            System.out.println("af_blocked  : " + (tafVerdict != null ? tafVerdict.get("af_blocked") : "n/a"));
-            System.out.println("af_validated: " + (tafVerdict != null ? tafVerdict.get("af_validated") : "n/a"));
-        } else if (status.status != null && status.status.startsWith("fail")) {
-            System.out.println("error     : " + status.currentStep);
-        }
-    }
-
-    // --- Asynchronous ----------------------------------------------------------
-
-    static void runAsyncExample(UwfEngineClient client) throws InterruptedException {
-        System.out.println("--- Async execution + polling ---");
-
-        ExecuteWorkflowInput req = new ExecuteWorkflowInput();
-        req.workflowId = WORKFLOW_ID;
-        req.inputData  = buildTransactionPayload("TXN-" + shortId());
-
-        ExecutionResult submitted = client.executeWorkflow(req);
-        System.out.println("run_id submitted: " + submitted.runId);
-
-        String runId = submitted.runId;
-        ExecutionStatus status = pollUntilDone(client, runId, 30_000);
-
-        System.out.println("final status: " + status.status);
-        if (status.currentStep != null) {
-            System.out.println("last step   : " + status.currentStep);
-        }
-
-        if ("completed".equals(status.status)) {
-            RunIdInput resultReq = new RunIdInput();
-            resultReq.runId = runId;
-            ExecutionResult result = client.getExecutionResult(resultReq);
-            // Engine wraps TAF output in result.result — navigate one level in
-            @SuppressWarnings("unchecked")
-            Map<String, Object> tafVerdict = result.result != null
-                ? (Map<String, Object>) result.result.get("result")
-                : null;
-            System.out.println("af_fraud    : " + (tafVerdict != null ? tafVerdict.get("af_fraud") : "n/a"));
-            System.out.println("af_blocked  : " + (tafVerdict != null ? tafVerdict.get("af_blocked") : "n/a"));
-            System.out.println("af_validated: " + (tafVerdict != null ? tafVerdict.get("af_validated") : "n/a"));
-        }
-    }
-
-    // --- Helpers ---------------------------------------------------------------
-
-    static Map<String, Object> buildTransactionPayload(String txnId) {
-        Map<String, Object> p = new HashMap<>();
-        p.put("id",                   txnId);
-        p.put("transactionType",      "purchase");
-        p.put("amount",               5000);          // in minor units (tiyn)
-        p.put("currency",             "KZT");
-        p.put("channel",              "pos");
-        p.put("date",                 Instant.now().toString());
-        p.put("sourceCardNumber",     "440000******1234");
-        p.put("sourceUserId",         "user-001");
-        p.put("merchantId",           "MERCH-0042");
-        p.put("merchantTerminalId",   "TERM-0001");
-        p.put("sicCode",              "5411");
-        p.put("transactionCountry",   "KZ");
-        p.put("transactionCity",      "Astana");
-        return p;
-    }
-
-    static ExecutionStatus pollUntilDone(UwfEngineClient client, String runId, long timeoutMs)
+    static void runCase(UwfEngineClient client, String label, String orderType,
+                        String clientId, long amount, String contractNumber)
             throws InterruptedException {
-        long deadline = System.currentTimeMillis() + timeoutMs;
+        String requestId = "example-" + label + "-" + shortId();
+        System.out.println("--- " + label + " (request_id=" + requestId + ") ---");
+
+        ExecuteWorkflowInput req = new ExecuteWorkflowInput();
+        req.workflowId = WORKFLOW_ID;
+        req.inputData  = buildPayload(requestId, orderType, clientId, amount, contractNumber);
+
+        ExecutionResult ack = client.executeWorkflow(req);
+        System.out.println("run_id    : " + ack.runId);
+
+        ExecutionStatus status = pollUntilDone(client, ack.runId);
+        System.out.println("status    : " + status.status);
+        if (status.currentStep != null && !status.currentStep.isEmpty()) {
+            System.out.println("last step : " + status.currentStep);
+        }
+        if (status.error != null && !status.error.isEmpty()) {
+            System.out.println("error     : " + status.error);
+        }
+
+        if (!"completed".equals(status.status)) {
+            return;
+        }
+
+        RunIdInput resultReq = new RunIdInput();
+        resultReq.runId = ack.runId;
+        ExecutionResult result = client.getExecutionResult(resultReq);
+        Map<String, Object> data = result.result != null ? result.result : Map.of();
+        System.out.println("verdict   : " + data.getOrDefault("verdict", "unknown"));
+        System.out.println("ruleset_id: " + data.getOrDefault("ruleset_id", "?"));
+        System.out.println("per_rule  : " + data.getOrDefault("per_rule", "[]"));
+    }
+
+    // taf-payment-v1 expects a wrapped input: { input_data: { request_id, format_id, tx: {...} } }
+    // UwfEngineClient wraps whatever we pass to inputData into `input_data` on the wire.
+    static Map<String, Object> buildPayload(String requestId, String orderType,
+                                             String clientId, long amount,
+                                             String contractNumber) {
+        Map<String, Object> tx = new HashMap<>();
+        tx.put("order_id",        "ORD-" + shortId());
+        tx.put("order_type",      orderType);
+        tx.put("client_id",       clientId);
+        tx.put("amount",          amount);
+        tx.put("contract_number", contractNumber == null ? "" : contractNumber);
+
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("request_id", requestId);
+        payload.put("format_id",  FORMAT_ID);
+        payload.put("tx",         tx);
+        return payload;
+    }
+
+    static ExecutionStatus pollUntilDone(UwfEngineClient client, String runId)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 15_000;
         RunIdInput req = new RunIdInput();
         req.runId = runId;
-
         while (System.currentTimeMillis() < deadline) {
             ExecutionStatus s = client.getExecutionStatus(req);
-            System.out.println("  polling... status=" + s.status
-                    + (s.currentStep != null ? " step=" + s.currentStep : ""));
-
-            if ("completed".equals(s.status) || "failed".equals(s.status)) {
+            if ("completed".equals(s.status) || "failed".equals(s.status)
+                || "cancelled".equals(s.status)) {
                 return s;
             }
-            Thread.sleep(1_000);
+            Thread.sleep(500);
         }
         throw new RuntimeException("timed out waiting for run_id=" + runId);
     }
@@ -160,17 +135,26 @@ public class TafPaymentExample {
         String clientSecret = System.getenv("VEX_CLIENT_SECRET");
         String staticToken  = System.getenv("VEX_TOKEN");
 
-        if (clientId != null && !clientId.isBlank() && clientSecret != null && !clientSecret.isBlank()) {
-            String tokenEndpoint = (authUrl != null && !authUrl.isBlank()) ? authUrl : gateUrl;
-            System.out.println("[auth] M2M client_credentials (" + clientId + " @ " + tokenEndpoint + ")");
-            return new M2MAuth(tokenEndpoint, clientId, clientSecret);
+        if (clientId != null && !clientId.isBlank()
+                && clientSecret != null && !clientSecret.isBlank()) {
+            String tokenBase = authUrl != null && !authUrl.isBlank()
+                ? authUrl
+                : stripPathSuffix(gateUrl);
+            System.out.println("[auth] M2M client_credentials (" + clientId + " @ " + tokenBase + ")");
+            return new M2MAuth(tokenBase, clientId, clientSecret);
         }
         if (staticToken != null && !staticToken.isBlank()) {
-            System.out.println("[auth] static Bearer token");
+            System.out.println("[auth] static Bearer token from VEX_TOKEN");
             return new BearerAuth(staticToken);
         }
-        System.out.println("[auth] no auth (endpoint requires no Authorization header)");
-        return NoAuth.INSTANCE;
+        System.err.println("ERROR: set VEX_CLIENT_ID+VEX_CLIENT_SECRET (M2M) or VEX_TOKEN (static)");
+        System.exit(1);
+        return null; // unreachable
+    }
+
+    static String stripPathSuffix(String url) {
+        int hostEnd = url.indexOf('/', url.indexOf("://") + 3);
+        return hostEnd < 0 ? url : url.substring(0, hostEnd);
     }
 
     static String requireEnv(String key) {

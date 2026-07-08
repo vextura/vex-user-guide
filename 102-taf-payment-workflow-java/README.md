@@ -1,22 +1,53 @@
 # TAF Payment Workflow — Java Integration Guide
 
-Integrate your application with the **`taf-payment-v1`** anti-fraud workflow using the [Vextura UWF Engine Java SDK](https://central.sonatype.com/artifact/ai.vextura/uwf-engine-sdk-java).
+Submit a payment transaction to the `taf-payment-v1` anti-fraud workflow on Qazpost and get a fraud verdict back.
+
+Verified against the Qazpost cluster (qzp-kz-north-1) on 2026-07-08 using the freshly-generated SDK.
 
 ## How it works
 
 ```
 Your application
-    │
-    │  POST /api/v1/workflows/taf-payment-v1/execute
+    │  POST /workflow/executions/taf-payment-v1
     ▼
-Vextura Workflow Engine  (no auth required)
-    │
-    │  invokes fn: taf-proxy, operation: SubmitTransaction
+vex-gate (JWT-protected)
+    │  proxies to unified-workflow-go
     ▼
-TAF Anti-Fraud Service
-    │
-    └─ verdict returned to workflow → caller
+Workflow: evaluate → route → create-incident
+    │        │           │           │
+    │   predicate-eval   choice    incident-trigger
+    │   fn               (verdict)  fn (block / review only)
+    ▼
+{ verdict: "allow" | "review" | "block", per_rule: [...] }
 ```
+
+Steps:
+
+1. `evaluate` — runs `predicate-eval.EvaluatePredicates` against the requested `format_id`. Returns `verdict`, `per_rule`, `ruleset_id`, `ruleset_version`, `eval_ms`.
+2. `route` — a workflow-level choice. `verdict=block` or `verdict=review` → `create-incident`. `verdict=allow` → workflow terminates cleanly.
+3. `create-incident` — publishes `incident.<tenant>.created` to JetStream; `vex-incident-mgr-ingest` consumes it and creates the incident row visible in the incident-mgr UI. `failure_policy=skip` so a publish failure does not fail the workflow.
+
+## Endpoint + auth
+
+**Qazpost gate**: `http://172.30.75.94:8080` (reachable directly from the Qazpost bastion `10.200.1.2`, or through an SSH tunnel from your workstation).
+
+**Authentication is required.** Requests without a valid Bearer JWT get `401`. Two ways to get a token:
+
+1. **M2M `client_credentials`** (recommended for services) — one-shot POST to `/auth/token`:
+
+    ```bash
+    curl -X POST http://172.30.75.94:8080/auth/token \
+      --data-urlencode grant_type=client_credentials \
+      --data-urlencode client_id=admin \
+      --data-urlencode client_secret=<qzp-admin-password> \
+      | jq -r .access_token
+    ```
+
+    Response: `{"access_token":"eyJ…","expires_in":7200,"token_type":"Bearer"}`.
+
+2. **Static token** (dev / demos) — export any pre-issued JWT via `VEX_TOKEN`.
+
+The Java SDK's `M2MAuth` handles refresh automatically; use `BearerAuth` for static.
 
 ## Maven dependency
 
@@ -24,21 +55,79 @@ TAF Anti-Fraud Service
 <dependency>
     <groupId>ai.vextura</groupId>
     <artifactId>uwf-engine-sdk-java</artifactId>
-    <version>1.2.6</version>
+    <version>1.2.4</version>
 </dependency>
 ```
 
+> The SDK is regenerated from `smithy/vex_uwf.smithy` via `vexctl sdk generate --lang java`. Pin to a version compatible with the current workflow-engine deployment on Qazpost.
+
 ## Configuration
 
-Add to `application.yml`:
+`application.yml`:
 
 ```yaml
-uwf:
-  engine:
-    url: http://172.30.75.85:8080
+vex:
+  gate:
+    url: http://172.30.75.94:8080/workflow
+  auth:
+    url: http://172.30.75.94:8080
+    client-id: admin
+    client-secret: <qzp-admin-password>
 ```
 
-No authentication credentials are required. The engine accepts requests without an Authorization header.
+The engine SDK expects `gate.url` to include the `/workflow` prefix — its generated methods target the smithy-declared paths (`/executions/{id}`, `/executions`) and the gate strips `/workflow` before proxying.
+
+## Request payload
+
+`taf-payment-v1` accepts a **wrapped** input:
+
+```json
+{
+  "input_data": {
+    "request_id": "<unique correlation id>",
+    "format_id":  "fmt_01kwc389zs8rapcqz3mf7yantx",
+    "tx": {
+      "order_id":        "ORD-001",
+      "order_type":      "charge",
+      "client_id":       "880101300123",
+      "amount":          100000,
+      "contract_number": "CTR-A"
+    }
+  }
+}
+```
+
+Field notes:
+
+| Field | Type | Notes |
+|---|---|---|
+| `request_id` | string | Your correlation id — surfaces in the verdict + track endpoint |
+| `format_id` | string | Registered format on Qazpost — use `fmt_01kwc389zs8rapcqz3mf7yantx` (binance-pay) |
+| `tx.order_id` | string | Merchant-side order reference |
+| `tx.order_type` | enum | `charge` \| `payout` |
+| `tx.client_id` | string | Client identifier used by ruleset predicates |
+| `tx.amount` | integer | Amount in minor units |
+| `tx.contract_number` | string | Contract reference (may be empty for anonymous flows — see rules) |
+
+## Verdict shape
+
+`predicate-eval` returns:
+
+```json
+{
+  "request_id":       "<echoed>",
+  "verdict":          "allow" | "review" | "block",
+  "per_rule": [
+    { "rule_id": "r_…", "matched": false, "eval_us": 3 },
+    { "rule_id": "r_…", "matched": true,  "action": "review", "eval_us": 10 }
+  ],
+  "ruleset_id":       "rs_01kwc39kpyjpbphsk16bswj32g",
+  "ruleset_version":  2,
+  "eval_ms":          16.061
+}
+```
+
+When `verdict=review` or `verdict=block` the workflow proceeds to `create-incident` and you can look up the resulting incident in the incident-mgr UI. When `verdict=allow` the workflow terminates cleanly.
 
 ## Adapter class
 
@@ -46,48 +135,65 @@ No authentication credentials are required. The engine accepts requests without 
 package your.package.adapter.uwf;
 
 import ai.vextura.uwf_engine.UwfEngineClient;
-import ai.vextura.uwf_engine.models.ExecuteWorkflowInput;
-import ai.vextura.uwf_engine.models.ExecutionResult;
-import ai.vextura.uwf_engine.models.ExecutionStatus;
-import ai.vextura.uwf_engine.models.RunIdInput;
-import ai.vextura.uwf_engine.runtime.NoAuth;
+import ai.vextura.uwf_engine.models.*;
+import ai.vextura.uwf_engine.runtime.M2MAuth;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
-import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.UUID;
 
 @Component
-public class UwfAntifraudAdapter {
+public class TafPaymentAdapter {
 
-    private static final Logger log = LoggerFactory.getLogger(UwfAntifraudAdapter.class);
+    private static final Logger log = LoggerFactory.getLogger(TafPaymentAdapter.class);
     private static final String WORKFLOW_ID = "taf-payment-v1";
-    private static final long POLL_TIMEOUT_MS  = 30_000;
-    private static final long POLL_INTERVAL_MS = 1_000;
+    private static final String FORMAT_ID   = "fmt_01kwc389zs8rapcqz3mf7yantx"; // binance-pay
+    private static final long POLL_TIMEOUT_MS  = 15_000;
+    private static final long POLL_INTERVAL_MS = 500;
 
     private final UwfEngineClient client;
 
-    public UwfAntifraudAdapter(@Value("${uwf.engine.url}") String engineUrl) {
-        this.client = UwfEngineClient.withEndpoint(engineUrl, NoAuth.INSTANCE);
+    public TafPaymentAdapter(
+        @Value("${vex.gate.url}")       String gateUrl,
+        @Value("${vex.auth.url}")       String authUrl,
+        @Value("${vex.auth.client-id}") String clientId,
+        @Value("${vex.auth.client-secret}") String clientSecret
+    ) {
+        this.client = UwfEngineClient.withEndpoint(
+            gateUrl,
+            new M2MAuth(authUrl, clientId, clientSecret)
+        );
     }
 
-    public AntifraudResult check(String orderId, long amount, String currency,
-                                  String channel, String cardNumber, String userId,
-                                  String merchantId, String terminalId,
-                                  String sicCode, String country, String city) {
+    public TafResult check(String orderId, String orderType, String clientId,
+                            long amount, String contractNumber) {
+        String requestId = "sdk-" + UUID.randomUUID();
+
+        Map<String, Object> tx = new HashMap<>();
+        tx.put("order_id",        orderId);
+        tx.put("order_type",      orderType);
+        tx.put("client_id",       clientId);
+        tx.put("amount",          amount);
+        tx.put("contract_number", contractNumber == null ? "" : contractNumber);
+
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("request_id", requestId);
+        payload.put("format_id",  FORMAT_ID);
+        payload.put("tx",         tx);
+
         try {
             ExecuteWorkflowInput req = new ExecuteWorkflowInput();
             req.workflowId = WORKFLOW_ID;
-            req.inputData  = buildPayload(orderId, amount, currency, channel,
-                                          cardNumber, userId, merchantId,
-                                          terminalId, sicCode, country, city);
+            req.inputData  = payload;
 
             ExecutionResult submitted = client.executeWorkflow(req);
             String runId = submitted.runId;
-            log.info("Antifraud submitted orderId={} runId={}", orderId, runId);
+            log.info("taf submitted orderId={} request_id={} run_id={}",
+                orderId, requestId, runId);
 
             ExecutionStatus status = pollUntilDone(runId);
 
@@ -96,26 +202,21 @@ public class UwfAntifraudAdapter {
                 resultReq.runId = runId;
                 ExecutionResult result = client.getExecutionResult(resultReq);
 
-                @SuppressWarnings("unchecked")
-                Map<String, Object> verdict = result.result != null
-                    ? (Map<String, Object>) result.result.get("result")
-                    : null;
-
-                boolean fraud     = Boolean.TRUE.equals(verdict != null ? verdict.get("af_fraud")     : null);
-                boolean blocked   = Boolean.TRUE.equals(verdict != null ? verdict.get("af_blocked")   : null);
-                boolean validated = Boolean.TRUE.equals(verdict != null ? verdict.get("af_validated") : null);
-
-                log.info("Antifraud result orderId={} runId={} fraud={} blocked={} validated={}",
-                         orderId, runId, fraud, blocked, validated);
-                return new AntifraudResult(runId, fraud, blocked, validated, null);
-            } else {
-                log.error("Antifraud workflow failed orderId={} runId={} status={}", orderId, runId, status.status);
-                return AntifraudResult.failed(runId, "workflow status: " + status.status);
+                Map<String, Object> data = result.result != null ? result.result : Map.of();
+                String verdict = (String) data.getOrDefault("verdict", "unknown");
+                Object perRule = data.get("per_rule");
+                log.info("taf verdict orderId={} request_id={} verdict={} per_rule={}",
+                    orderId, requestId, verdict, perRule);
+                return new TafResult(runId, requestId, verdict, perRule, null);
             }
+            log.warn("taf workflow non-terminal orderId={} runId={} status={}",
+                orderId, runId, status.status);
+            return TafResult.failed(runId, requestId,
+                "workflow status: " + status.status);
 
         } catch (Exception e) {
-            log.error("Antifraud SDK error orderId={}", orderId, e);
-            return AntifraudResult.failed(null, e.getMessage());
+            log.error("taf adapter error orderId={}", orderId, e);
+            return TafResult.failed(null, requestId, e.getMessage());
         }
     }
 
@@ -130,77 +231,97 @@ public class UwfAntifraudAdapter {
             }
             Thread.sleep(POLL_INTERVAL_MS);
         }
-        throw new RuntimeException("Antifraud timed out runId=" + runId);
+        throw new RuntimeException("TAF timed out runId=" + runId);
     }
 
-    private Map<String, Object> buildPayload(String orderId, long amount, String currency,
-                                              String channel, String cardNumber, String userId,
-                                              String merchantId, String terminalId,
-                                              String sicCode, String country, String city) {
-        Map<String, Object> p = new HashMap<>();
-        p.put("id",                 orderId);
-        p.put("transactionType",    "purchase");
-        p.put("amount",             amount);
-        p.put("currency",           currency);
-        p.put("channel",            channel);
-        p.put("date",               Instant.now().toString());
-        p.put("sourceCardNumber",   cardNumber);
-        p.put("sourceUserId",       userId);
-        p.put("merchantId",         merchantId);
-        p.put("merchantTerminalId", terminalId);
-        p.put("sicCode",            sicCode);
-        p.put("transactionCountry", country);
-        p.put("transactionCity",    city);
-        return p;
-    }
-
-    public static class AntifraudResult {
+    public static class TafResult {
         public final String  runId;
-        public final boolean fraud;
-        public final boolean blocked;
-        public final boolean validated;
+        public final String  requestId;
+        public final String  verdict;    // "allow" | "review" | "block"
+        public final Object  perRule;
         public final String  error;
 
-        public AntifraudResult(String runId, boolean fraud, boolean blocked,
-                                boolean validated, String error) {
-            this.runId      = runId;
-            this.fraud      = fraud;
-            this.blocked    = blocked;
-            this.validated  = validated;
-            this.error      = error;
+        public TafResult(String runId, String requestId, String verdict,
+                          Object perRule, String error) {
+            this.runId     = runId;
+            this.requestId = requestId;
+            this.verdict   = verdict;
+            this.perRule   = perRule;
+            this.error     = error;
         }
 
-        public boolean isSuccess() { return error == null; }
+        public boolean isBlocked() { return "block".equals(verdict); }
+        public boolean isReview()  { return "review".equals(verdict); }
+        public boolean isAllow()   { return "allow".equals(verdict); }
 
-        public static AntifraudResult failed(String runId, String error) {
-            return new AntifraudResult(runId, false, false, false, error);
+        public static TafResult failed(String runId, String requestId, String error) {
+            return new TafResult(runId, requestId, "error", null, error);
         }
     }
 }
 ```
 
-## Transaction payload fields
+## Curl reference (matches the SDK wire calls exactly)
 
-| Field | Type | Description |
-|---|---|---|
-| `id` | string | Unique transaction / order ID |
-| `transactionType` | string | `purchase`, `refund`, `withdrawal`, etc. |
-| `amount` | number | Amount in minor units (e.g. tiyn for KZT) |
-| `currency` | string | ISO 4217 code (`KZT`, `USD`, …) |
-| `channel` | string | `pos`, `atm`, `online`, `mobile` |
-| `date` | string | ISO 8601 timestamp |
-| `sourceCardNumber` | string | Masked PAN (`440000******1234`) |
-| `sourceUserId` | string | Cardholder identifier |
-| `merchantId` | string | Merchant identifier |
-| `merchantTerminalId` | string | Terminal identifier |
-| `sicCode` | string | ISO 18245 MCC code |
-| `transactionCountry` | string | ISO 3166-1 alpha-2 country |
-| `transactionCity` | string | City name |
+```bash
+export GATE=http://172.30.75.94:8080
+export TOK=$(curl -s -X POST $GATE/auth/token \
+  --data-urlencode grant_type=client_credentials \
+  --data-urlencode client_id=admin \
+  --data-urlencode client_secret=<qzp-admin-password> \
+  | jq -r .access_token)
 
-## Verdict fields
+# safe transaction — expect verdict=allow
+curl -s -X POST $GATE/workflow/executions/taf-payment-v1 \
+  -H "Authorization: Bearer $TOK" \
+  -H "Content-Type: application/json" \
+  -H "X-Vex-Tenant: vextura" \
+  -d @- <<EOF | jq
+{
+  "input_data": {
+    "request_id": "curl-safe-$(date +%s)",
+    "format_id":  "fmt_01kwc389zs8rapcqz3mf7yantx",
+    "tx": {
+      "order_id":        "ORD-001",
+      "order_type":      "charge",
+      "client_id":       "880101300123",
+      "amount":          100000,
+      "contract_number": "CTR-A"
+    }
+  }
+}
+EOF
+```
 
-| Field | Type | Meaning |
-|---|---|---|
-| `af_fraud` | boolean | Transaction flagged as fraud |
-| `af_blocked` | boolean | Transaction blocked by TAF |
-| `af_validated` | boolean | Transaction passed validation |
+Response:
+
+```json
+{ "message": "Workflow queued for execution",
+  "run_id":  "run-1783487324036644893",
+  "status":  "pending" }
+```
+
+Poll for the verdict:
+
+```bash
+RID="curl-safe-<same as above>"
+curl -s -H "Authorization: Bearer $TOK" \
+       -H "X-Vex-Tenant: vextura" \
+       "$GATE/antifraud/track/$RID" | jq
+
+# → { "request_id": "curl-safe-…", "status": "completed",
+#     "verdict":    "allow", "verdict_id": "v_…" }
+```
+
+Or poll the workflow execution directly:
+
+```bash
+curl -s -H "Authorization: Bearer $TOK" \
+       "$GATE/workflow/executions/run-1783487324036644893" | jq
+```
+
+## Testing tips
+
+- The transaction shape drives the verdict — the same `client_id` + a suspicious `order_type=payout` + empty `contract_number` will typically return `verdict=block` (matches a rule), whereas a normal `charge` with a contract number returns `allow`.
+- The verdict is deterministic per (`format_id`, ruleset_version, `tx`); replay the same `request_id` to get the same verdict from cache.
+- Block / review verdicts create an incident visible in the incident-mgr UI (`http://172.30.75.93:3006/` via bastion tunnel).
