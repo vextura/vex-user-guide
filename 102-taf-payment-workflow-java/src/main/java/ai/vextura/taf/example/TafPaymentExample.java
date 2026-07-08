@@ -6,6 +6,7 @@ import ai.vextura.uwf_engine.runtime.AuthProvider;
 import ai.vextura.uwf_engine.runtime.BearerAuth;
 import ai.vextura.uwf_engine.runtime.M2MAuth;
 
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -52,22 +53,49 @@ public class TafPaymentExample {
         System.out.println("Format ID : " + FORMAT_ID);
         System.out.println();
 
-        runCase(client, "safe-small", "charge", "880101300123", 50_000L, "CTR-1");
-        System.out.println();
-        runCase(client, "review-hi",  "charge", "880101300123", 2_000_000L, "CTR-2");
-        System.out.println();
-        runCase(client, "block-payout-nocontract", "payout", "880101300123", 500_000L, "");
+        Tx safe = new Tx("charge",  100_000L, "kzt", "KZ00563000PN00000000", "private",  "binance", "6051");
+        Tx review = new Tx("charge",  2_000_000L, "kzt", "KZ00563000PN00000000", "private",  "binance", "6051");
+        Tx blockPayout = new Tx("payout", 500_000L,   "kzt", "",                     "private", "binance", "6051");
+        Tx reviewUsd  = new Tx("charge",  100_000L, "usd", "KZ00563000PN00000000", "private",  "binance", "6051");
+        Tx blockChannel = new Tx("charge",  100_000L, "kzt", "KZ00563000PN00000000", "private", "kaspi",   "6051");
+
+        runCase(client, "safe",           safe);         System.out.println();
+        runCase(client, "review-medium",  review);       System.out.println();
+        runCase(client, "block-payout",   blockPayout);  System.out.println();
+        runCase(client, "review-non-kzt", reviewUsd);    System.out.println();
+        runCase(client, "block-channel",  blockChannel);
     }
 
-    static void runCase(UwfEngineClient client, String label, String orderType,
-                        String clientId, long amount, String contractNumber)
+    /** Client's binance-pay format v2 — mirror the exact wire fields. */
+    static class Tx {
+        final String transactionType;
+        final long   amount;
+        final String currency;
+        final String sourceIbanNumber;
+        final String clientType;
+        final String channel;
+        final String sicCode;
+
+        Tx(String transactionType, long amount, String currency,
+           String sourceIbanNumber, String clientType, String channel, String sicCode) {
+            this.transactionType  = transactionType;
+            this.amount           = amount;
+            this.currency         = currency;
+            this.sourceIbanNumber = sourceIbanNumber;
+            this.clientType       = clientType;
+            this.channel          = channel;
+            this.sicCode          = sicCode;
+        }
+    }
+
+    static void runCase(UwfEngineClient client, String label, Tx tx)
             throws InterruptedException {
         String requestId = "example-" + label + "-" + shortId();
         System.out.println("--- " + label + " (request_id=" + requestId + ") ---");
 
         ExecuteWorkflowInput req = new ExecuteWorkflowInput();
         req.workflowId = WORKFLOW_ID;
-        req.inputData  = buildPayload(requestId, orderType, clientId, amount, contractNumber);
+        req.inputData  = buildPayload(requestId, tx);
 
         ExecutionResult ack = client.executeWorkflow(req);
         System.out.println("run_id    : " + ack.runId);
@@ -106,21 +134,25 @@ public class TafPaymentExample {
     }
 
     // taf-payment-v1 expects a wrapped input: { input_data: { request_id, format_id, tx: {...} } }
+    // The tx object mirrors the binance-pay format v2 fields exactly (client contract).
     // UwfEngineClient wraps whatever we pass to inputData into `input_data` on the wire.
-    static Map<String, Object> buildPayload(String requestId, String orderType,
-                                             String clientId, long amount,
-                                             String contractNumber) {
-        Map<String, Object> tx = new HashMap<>();
-        tx.put("order_id",        "ORD-" + shortId());
-        tx.put("order_type",      orderType);
-        tx.put("client_id",       clientId);
-        tx.put("amount",          amount);
-        tx.put("contract_number", contractNumber == null ? "" : contractNumber);
+    static Map<String, Object> buildPayload(String requestId, Tx tx) {
+        Map<String, Object> txMap = new HashMap<>();
+        txMap.put("order_id",         "kz" + shortId().toLowerCase());
+        txMap.put("client_id",        "901111300300");
+        txMap.put("client_type",      tx.clientType);
+        txMap.put("amount",           tx.amount);
+        txMap.put("currency",         tx.currency);
+        txMap.put("sourceIbanNumber", tx.sourceIbanNumber);
+        txMap.put("transactionType",  tx.transactionType);
+        txMap.put("channel",          tx.channel);
+        txMap.put("sicCode",          tx.sicCode);
+        txMap.put("date",             Instant.now().toString());
 
         Map<String, Object> payload = new HashMap<>();
         payload.put("request_id", requestId);
         payload.put("format_id",  FORMAT_ID);
-        payload.put("tx",         tx);
+        payload.put("tx",         txMap);
         return payload;
     }
 

@@ -79,7 +79,7 @@ vex:
 
 ## Request payload
 
-`taf-payment-v1` accepts a **wrapped** input:
+`taf-payment-v1` accepts a **wrapped** input. The `tx` object mirrors the binance-pay format v2 (client contract):
 
 ```json
 {
@@ -87,11 +87,16 @@ vex:
     "request_id": "<unique correlation id>",
     "format_id":  "fmt_01kwc389zs8rapcqz3mf7yantx",
     "tx": {
-      "order_id":        "ORD-001",
-      "order_type":      "charge",
-      "client_id":       "880101300123",
-      "amount":          100000,
-      "contract_number": "CTR-A"
+      "order_id":         "kzwmsc390s",
+      "client_id":        "901111300300",
+      "client_type":      "private",
+      "amount":           100000,
+      "currency":         "kzt",
+      "sourceIbanNumber": "KZ00563000PN00000000",
+      "transactionType":  "charge",
+      "channel":          "binance",
+      "sicCode":          "6051",
+      "date":             "2026-06-15T09:18:20.475482504Z"
     }
   }
 }
@@ -101,13 +106,20 @@ Field notes:
 
 | Field | Type | Notes |
 |---|---|---|
-| `request_id` | string | Your correlation id — surfaces in the verdict + track endpoint |
-| `format_id` | string | Registered format on Qazpost — use `fmt_01kwc389zs8rapcqz3mf7yantx` (binance-pay) |
+| `request_id` | string | Your correlation id — surfaces in the verdict + `/antifraud/track` endpoint |
+| `format_id` | string | Registered format on Qazpost — use `fmt_01kwc389zs8rapcqz3mf7yantx` (binance-pay v2) |
 | `tx.order_id` | string | Merchant-side order reference |
-| `tx.order_type` | enum | `charge` \| `payout` |
-| `tx.client_id` | string | Client identifier used by ruleset predicates |
-| `tx.amount` | integer | Amount in minor units |
-| `tx.contract_number` | string | Contract reference (may be empty for anonymous flows — see rules) |
+| `tx.client_id` | string | IIN, 12 digits — invalid length triggers `review-invalid-iin` |
+| `tx.client_type` | enum | `private` \| `business` — `business` combined with amount > 500 000 triggers `review-business-large` |
+| `tx.amount` | integer | Amount in minor units of `currency` |
+| `tx.currency` | string | ISO 4217 lowercase (`kzt`, `usd`, ...) — anything other than `kzt` triggers `review-non-kzt-currency` |
+| `tx.sourceIbanNumber` | string | Source IBAN — required for payouts. Empty on a `payout` triggers `block-payout-no-iban` |
+| `tx.transactionType` | enum | `charge` \| `payout` |
+| `tx.channel` | string | Channel identifier — anything other than `binance` triggers `block-unknown-channel` |
+| `tx.sicCode` | string | ISO 18245 MCC / SIC code |
+| `tx.date` | string | ISO 8601 timestamp |
+
+Amount rules (kept from v1): `amount == 0` → block, `amount > 5 000 000` → block, `1 000 000 ≤ amount < 5 000 000` → review.
 
 ## Verdict shape
 
@@ -121,9 +133,9 @@ Field notes:
     { "rule_id": "r_…", "matched": false, "eval_us": 3 },
     { "rule_id": "r_…", "matched": true,  "action": "review", "eval_us": 10 }
   ],
-  "ruleset_id":       "rs_01kwc39kpyjpbphsk16bswj32g",
-  "ruleset_version":  2,
-  "eval_ms":          16.061
+  "ruleset_id":       "rs_01kx05sjdvwj0mevjg7f62whrm",
+  "ruleset_version":  1,
+  "eval_ms":          0.216
 }
 ```
 
@@ -142,6 +154,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -151,7 +164,7 @@ public class TafPaymentAdapter {
 
     private static final Logger log = LoggerFactory.getLogger(TafPaymentAdapter.class);
     private static final String WORKFLOW_ID = "taf-payment-v1";
-    private static final String FORMAT_ID   = "fmt_01kwc389zs8rapcqz3mf7yantx"; // binance-pay
+    private static final String FORMAT_ID   = "fmt_01kwc389zs8rapcqz3mf7yantx"; // binance-pay v2
     private static final long POLL_TIMEOUT_MS  = 15_000;
     private static final long POLL_INTERVAL_MS = 500;
 
@@ -169,16 +182,22 @@ public class TafPaymentAdapter {
         );
     }
 
-    public TafResult check(String orderId, String orderType, String clientId,
-                            long amount, String contractNumber) {
+    public TafResult check(String orderId, String clientId, String clientType,
+                            long amount, String currency, String sourceIbanNumber,
+                            String transactionType, String channel, String sicCode) {
         String requestId = "sdk-" + UUID.randomUUID();
 
         Map<String, Object> tx = new HashMap<>();
-        tx.put("order_id",        orderId);
-        tx.put("order_type",      orderType);
-        tx.put("client_id",       clientId);
-        tx.put("amount",          amount);
-        tx.put("contract_number", contractNumber == null ? "" : contractNumber);
+        tx.put("order_id",         orderId);
+        tx.put("client_id",        clientId);
+        tx.put("client_type",      clientType);
+        tx.put("amount",           amount);
+        tx.put("currency",         currency);
+        tx.put("sourceIbanNumber", sourceIbanNumber == null ? "" : sourceIbanNumber);
+        tx.put("transactionType",  transactionType);
+        tx.put("channel",          channel);
+        tx.put("sicCode",          sicCode);
+        tx.put("date",             Instant.now().toString());
 
         Map<String, Object> payload = new HashMap<>();
         payload.put("request_id", requestId);
@@ -293,11 +312,16 @@ curl -s -X POST $GATE/workflow/executions/taf-payment-v1 \
     "request_id": "curl-safe-$(date +%s)",
     "format_id":  "fmt_01kwc389zs8rapcqz3mf7yantx",
     "tx": {
-      "order_id":        "ORD-001",
-      "order_type":      "charge",
-      "client_id":       "880101300123",
-      "amount":          100000,
-      "contract_number": "CTR-A"
+      "order_id":         "kzwmsc390s",
+      "client_id":        "901111300300",
+      "client_type":      "private",
+      "amount":           100000,
+      "currency":         "kzt",
+      "sourceIbanNumber": "KZ00563000PN00000000",
+      "transactionType":  "charge",
+      "channel":          "binance",
+      "sicCode":          "6051",
+      "date":             "2026-06-15T09:18:20.475482504Z"
     }
   }
 }
@@ -333,6 +357,16 @@ curl -s -H "Authorization: Bearer $TOK" \
 
 ## Testing tips
 
-- The transaction shape drives the verdict — the same `client_id` + a suspicious `order_type=payout` + empty `contract_number` will typically return `verdict=block` (matches a rule), whereas a normal `charge` with a contract number returns `allow`.
-- The verdict is deterministic per (`format_id`, ruleset_version, `tx`); replay the same `request_id` to get the same verdict from cache.
+Verified 5 cases end-to-end against qzp-kz-north-1 on 2026-07-08:
+
+| Case | Change from safe baseline | Verdict | Rule matched |
+|---|---|---|---|
+| **safe** | none | `allow` | (all rules bypass, clean) |
+| **review-medium** | `amount: 2_000_000` | `review` | `review-medium-amount` (`1_000_000 ≤ amount < 5_000_000`) |
+| **block-payout** | `transactionType: "payout"`, `sourceIbanNumber: ""` | `block` | `block-payout-no-iban` (empty IBAN on payout) |
+| **review-non-kzt** | `currency: "usd"` | `review` | `review-non-kzt-currency` (`currency != "kzt"`) |
+| **block-channel** | `channel: "kaspi"` | `block` | `block-unknown-channel` (`channel != "binance"`) |
+
+- The verdict is deterministic per (`format_id`, `ruleset_version`, `tx`); replay the same `request_id` to get the same verdict from cache.
 - Block / review verdicts create an incident visible in the incident-mgr UI (`http://172.30.75.93:3006/` via bastion tunnel).
+- Additional rules that fire on the same field set: `amount == 0` → block, `amount > 5_000_000` → block, `len(client_id) != 12` → review, `client_type == "business" && amount > 500_000` → review.

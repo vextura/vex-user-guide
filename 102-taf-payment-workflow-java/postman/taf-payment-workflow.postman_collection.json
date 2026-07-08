@@ -1,0 +1,189 @@
+{
+  "info": {
+    "name": "TAF Payment Workflow (Qazpost)",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Wire-matches ai.vextura:uwf-engine-sdk-java 1.2.7 against qzp-kz-north-1. Fields mirror binance-pay format v2 (client contract: order_id, client_id, client_type, amount, currency, sourceIbanNumber, transactionType, channel, sicCode, date). Run in order 1..4 (or Collection Runner) to see the full round-trip; 5–8 are additional rule-branch cases."
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{access_token}}", "type": "string" }]
+  },
+  "item": [
+    {
+      "name": "1. Login (client_credentials)",
+      "request": {
+        "auth": { "type": "noauth" },
+        "method": "POST",
+        "url": { "raw": "{{auth_url}}/auth/token", "host": ["{{auth_url}}"], "path": ["auth", "token"] },
+        "header": [{ "key": "Content-Type", "value": "application/x-www-form-urlencoded" }],
+        "body": {
+          "mode": "urlencoded",
+          "urlencoded": [
+            { "key": "grant_type",    "value": "client_credentials" },
+            { "key": "client_id",     "value": "{{client_id}}" },
+            { "key": "client_secret", "value": "{{client_secret}}" }
+          ]
+        }
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "type": "text/javascript", "exec": [
+          "const j = pm.response.json();",
+          "pm.environment.set('access_token', j.access_token);",
+          "pm.test('got access_token', () => pm.expect(j.access_token).to.be.a('string').and.have.length.above(20));"
+        ]}
+      }]
+    },
+    {
+      "name": "2. ExecuteWorkflow — safe (verdict=allow)",
+      "request": {
+        "method": "POST",
+        "url": {
+          "raw": "{{gate_url}}/workflow/executions/{{workflow_id}}",
+          "host": ["{{gate_url}}"], "path": ["workflow", "executions", "{{workflow_id}}"]
+        },
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-Vex-Tenant", "value": "{{tenant}}" }
+        ],
+        "body": { "mode": "raw", "raw":
+          "{\n  \"input_data\": {\n    \"request_id\": \"{{last_request_id}}\",\n    \"format_id\":  \"{{format_id}}\",\n    \"tx\": {\n      \"order_id\":         \"kzwmsc390s\",\n      \"client_id\":        \"{{iin}}\",\n      \"client_type\":      \"private\",\n      \"amount\":           100000,\n      \"currency\":         \"kzt\",\n      \"sourceIbanNumber\": \"{{source_iban}}\",\n      \"transactionType\":  \"charge\",\n      \"channel\":          \"binance\",\n      \"sicCode\":          \"6051\",\n      \"date\":             \"{{$isoTimestamp}}\"\n    }\n  }\n}"
+        }
+      },
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": { "type": "text/javascript", "exec": [
+            "pm.environment.set('last_request_id', 'postman-safe-' + Date.now());"
+          ]}
+        },
+        {
+          "listen": "test",
+          "script": { "type": "text/javascript", "exec": [
+            "const j = pm.response.json();",
+            "pm.environment.set('run_id', j.run_id);",
+            "pm.test('workflow queued', () => pm.expect(j.status).to.equal('pending'));",
+            "pm.test('got run_id',    () => pm.expect(j.run_id).to.match(/^run-/));"
+          ]}
+        }
+      ]
+    },
+    {
+      "name": "3. GetExecutionStatus",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{gate_url}}/workflow/executions/{{run_id}}",
+          "host": ["{{gate_url}}"], "path": ["workflow", "executions", "{{run_id}}"]
+        },
+        "header": [{ "key": "X-Vex-Tenant", "value": "{{tenant}}" }]
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "type": "text/javascript", "exec": [
+          "const j = pm.response.json();",
+          "pm.test('terminal', () => pm.expect(['completed','failed']).to.include(j.status));"
+        ]}
+      }]
+    },
+    {
+      "name": "4. GetExecutionResult (verdict)",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{gate_url}}/workflow/executions/{{run_id}}/result",
+          "host": ["{{gate_url}}"], "path": ["workflow", "executions", "{{run_id}}", "result"]
+        },
+        "header": [{ "key": "X-Vex-Tenant", "value": "{{tenant}}" }]
+      },
+      "event": [{
+        "listen": "test",
+        "script": { "type": "text/javascript", "exec": [
+          "const j = pm.response.json();",
+          "const verdict = j?.result?.result?.verdict;",
+          "pm.test('has verdict', () => pm.expect(['allow','review','block']).to.include(verdict));",
+          "console.log('verdict =', verdict);"
+        ]}
+      }]
+    },
+    {
+      "name": "5. Track by request_id (shortcut)",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{gate_url}}/antifraud/track/{{last_request_id}}",
+          "host": ["{{gate_url}}"], "path": ["antifraud", "track", "{{last_request_id}}"]
+        },
+        "header": [{ "key": "X-Vex-Tenant", "value": "{{tenant}}" }]
+      }
+    },
+    {
+      "name": "6. Execute — review-medium (amount=2M → verdict=review)",
+      "request": {
+        "method": "POST",
+        "url": {
+          "raw": "{{gate_url}}/workflow/executions/{{workflow_id}}",
+          "host": ["{{gate_url}}"], "path": ["workflow", "executions", "{{workflow_id}}"]
+        },
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-Vex-Tenant", "value": "{{tenant}}" }
+        ],
+        "body": { "mode": "raw", "raw":
+          "{\n  \"input_data\": {\n    \"request_id\": \"postman-review-{{$timestamp}}\",\n    \"format_id\":  \"{{format_id}}\",\n    \"tx\": {\n      \"order_id\":         \"kzwmsc391m\",\n      \"client_id\":        \"{{iin}}\",\n      \"client_type\":      \"private\",\n      \"amount\":           2000000,\n      \"currency\":         \"kzt\",\n      \"sourceIbanNumber\": \"{{source_iban}}\",\n      \"transactionType\":  \"charge\",\n      \"channel\":          \"binance\",\n      \"sicCode\":          \"6051\",\n      \"date\":             \"{{$isoTimestamp}}\"\n    }\n  }\n}"
+        }
+      }
+    },
+    {
+      "name": "7. Execute — block-payout (empty sourceIbanNumber → verdict=block)",
+      "request": {
+        "method": "POST",
+        "url": {
+          "raw": "{{gate_url}}/workflow/executions/{{workflow_id}}",
+          "host": ["{{gate_url}}"], "path": ["workflow", "executions", "{{workflow_id}}"]
+        },
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-Vex-Tenant", "value": "{{tenant}}" }
+        ],
+        "body": { "mode": "raw", "raw":
+          "{\n  \"input_data\": {\n    \"request_id\": \"postman-block-payout-{{$timestamp}}\",\n    \"format_id\":  \"{{format_id}}\",\n    \"tx\": {\n      \"order_id\":         \"kzwmsc392p\",\n      \"client_id\":        \"{{iin}}\",\n      \"client_type\":      \"private\",\n      \"amount\":           500000,\n      \"currency\":         \"kzt\",\n      \"sourceIbanNumber\": \"\",\n      \"transactionType\":  \"payout\",\n      \"channel\":          \"binance\",\n      \"sicCode\":          \"6051\",\n      \"date\":             \"{{$isoTimestamp}}\"\n    }\n  }\n}"
+        }
+      }
+    },
+    {
+      "name": "8. Execute — review-non-kzt (currency=usd → verdict=review)",
+      "request": {
+        "method": "POST",
+        "url": {
+          "raw": "{{gate_url}}/workflow/executions/{{workflow_id}}",
+          "host": ["{{gate_url}}"], "path": ["workflow", "executions", "{{workflow_id}}"]
+        },
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-Vex-Tenant", "value": "{{tenant}}" }
+        ],
+        "body": { "mode": "raw", "raw":
+          "{\n  \"input_data\": {\n    \"request_id\": \"postman-review-usd-{{$timestamp}}\",\n    \"format_id\":  \"{{format_id}}\",\n    \"tx\": {\n      \"order_id\":         \"kzwmsc393u\",\n      \"client_id\":        \"{{iin}}\",\n      \"client_type\":      \"private\",\n      \"amount\":           100000,\n      \"currency\":         \"usd\",\n      \"sourceIbanNumber\": \"{{source_iban}}\",\n      \"transactionType\":  \"charge\",\n      \"channel\":          \"binance\",\n      \"sicCode\":          \"6051\",\n      \"date\":             \"{{$isoTimestamp}}\"\n    }\n  }\n}"
+        }
+      }
+    },
+    {
+      "name": "9. Execute — block-channel (channel=kaspi → verdict=block)",
+      "request": {
+        "method": "POST",
+        "url": {
+          "raw": "{{gate_url}}/workflow/executions/{{workflow_id}}",
+          "host": ["{{gate_url}}"], "path": ["workflow", "executions", "{{workflow_id}}"]
+        },
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-Vex-Tenant", "value": "{{tenant}}" }
+        ],
+        "body": { "mode": "raw", "raw":
+          "{\n  \"input_data\": {\n    \"request_id\": \"postman-block-channel-{{$timestamp}}\",\n    \"format_id\":  \"{{format_id}}\",\n    \"tx\": {\n      \"order_id\":         \"kzwmsc394o\",\n      \"client_id\":        \"{{iin}}\",\n      \"client_type\":      \"private\",\n      \"amount\":           100000,\n      \"currency\":         \"kzt\",\n      \"sourceIbanNumber\": \"{{source_iban}}\",\n      \"transactionType\":  \"charge\",\n      \"channel\":          \"kaspi\",\n      \"sicCode\":          \"6051\",\n      \"date\":             \"{{$isoTimestamp}}\"\n    }\n  }\n}"
+        }
+      }
+    }
+  ]
+}
